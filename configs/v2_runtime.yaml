@@ -1,0 +1,106 @@
+event_bus: {}
+
+
+memory:
+  db_path: data/memory_v2.sqlite
+
+memory_consolidator:
+  enable: true
+  interval_sec: 3600
+  archive_after_days: 7
+  max_scan: 1000
+
+llm_gateway:
+  enable: false
+  default_model: openai_gpt4o_mini
+  goal_model: openai_gpt4o_mini
+  timeout_s: 45
+  max_attempts: 2
+  backoff_s: 0.25
+  max_concurrency: 4
+
+  circuit_breaker:
+    failure_threshold: 3
+    recovery_timeout_s: 30
+
+  routing:
+    routes:
+      chat:
+        models: [openai_gpt4o_mini]
+      goal:
+        models: [openai_gpt4o_mini]
+      coding:
+        models: [openai_gpt4o_mini]
+      reflection:
+        models: [openai_gpt4o_mini]
+
+  models:
+    openai_gpt4o_mini:
+      provider: openai
+      api_base: https://api.openai.com/v1
+      model_name: gpt-4o-mini
+      api_key_env: OPENAI_API_KEY
+      temperature: 0.2
+      capabilities: [text, json]
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+
+
+conversation:
+  enable: true
+  db_path: data/conversations_v2.sqlite
+  route: chat
+  model: null
+  history_limit: 12
+  memory_limit: 8
+  system_prompt: "You are Capsule Brain, a precise autonomous AI assistant."
+
+goal_planner:
+  db_path: data/goals_v2.sqlite
+
+redis_bridge:
+  enable: false
+  url: redis://localhost:6379/0
+  channel_prefix: capsule
+  inbound_topics: [goal.request]
+  outbound_topics:
+    [goal.created, goal.task.updated, goal.task.edited, goal.edited]
+
+
+learning:
+  db_path: data/experience_v2.sqlite
+
+feedback:
+  enable: true
+
+
+reflection:
+  enable: true
+  db_path: data/reflections_v2.sqlite
+  route: reflection
+  model: null
+  max_iterations: 4
+  max_seed_chars: 4000
+
+verification:
+  enable: true
+  db_path: data/verification_v2.sqlite
+
+execution:
+  enable: false
+  allow: false
+  runner: host
+  db_path: data/execution_v2.sqlite
+  cwd_root: sandbox
+  timeout_s: 10
+  max_output_chars: 20000
+  allowed_commands: [python, pytest]
+
+  container_engine: docker
+  container_image: python:3.11-slim
+  container_memory: 512m
+  container_memory_swap: 512m
+  container_cpus: "1.0"
+  container_pids_limit: 128
+  container_nofile_limit: 1024
+  container_pin_image_digest: true
