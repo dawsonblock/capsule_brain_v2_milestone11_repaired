@@ -38,6 +38,14 @@ class ConversationService(CapsuleService):
         self.model = self.cfg.get("model")
         self.history_limit = int(self.cfg.get("history_limit", 12))
         self.memory_limit = int(self.cfg.get("memory_limit", 8))
+        # Semantic memory retrieval. When enabled, the conversation service
+        # embeds the user's message and retrieves the top-K semantically
+        # relevant memories instead of the most recent K. Falls back to
+        # chronological retrieval if semantic search is unavailable.
+        self.semantic_memory = bool(self.cfg.get("semantic_memory", False))
+        self.semantic_memory_limit = int(
+            self.cfg.get("semantic_memory_limit", self.memory_limit)
+        )
         self.system_prompt = self.cfg.get(
             "system_prompt",
             "You are Capsule Brain, a precise autonomous AI assistant.",
@@ -128,10 +136,7 @@ class ConversationService(CapsuleService):
             conversation.id,
             limit=self.history_limit,
         )
-        memory_records = await self.memory.recent(
-            limit=self.memory_limit,
-            include_archived=False,
-        )
+        memory_records = await self._retrieve_memories(text)
 
         context = self._build_context(history, memory_records)
 
@@ -246,6 +251,29 @@ class ConversationService(CapsuleService):
         )
 
         return response
+
+    async def _retrieve_memories(self, user_text: str):
+        """Retrieve memories relevant to ``user_text``.
+
+        When semantic_memory is enabled and the memory service has a working
+        embedding provider, embeds the user message and retrieves the top-K
+        semantically similar memories. Falls back to chronological recent()
+        retrieval on any error so a transient embedding failure never breaks
+        the conversation path.
+        """
+        if self.semantic_memory:
+            try:
+                return await self.memory.search_semantic(
+                    user_text,
+                    limit=self.semantic_memory_limit,
+                    include_archived=False,
+                )
+            except Exception:
+                pass
+        return await self.memory.recent(
+            limit=self.memory_limit,
+            include_archived=False,
+        )
 
     def _build_context(self, history, memories) -> str:
         parts = ["Conversation history:"]

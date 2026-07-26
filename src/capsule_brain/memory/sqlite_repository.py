@@ -6,6 +6,12 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+from .embeddings import (
+    cosine_similarity,
+    deserialize_vector,
+    serialize_vector,
+    try_load_sqlite_vec,
+)
 from .models import MemoryRecord, MemoryType, utc_now_iso
 from .repository import MemoryRepository
 
@@ -15,12 +21,22 @@ class SQLiteMemoryRepository(MemoryRepository):
 
     A single asyncio lock protects connection use because sqlite3 connections are
     synchronous and not safe for concurrent coroutine access without serialization.
+
+    Semantic vector search is supported via an optional ``memory_embeddings``
+    table. When the ``sqlite-vec`` extension is loadable, similarity search is
+    executed inside SQLite; otherwise the repository falls back to an
+    in-Python cosine-similarity scan over stored embeddings. Both paths share
+    the same ``search_semantic`` API so callers do not need to know which
+    backend is active.
     """
 
     def __init__(self, db_path: str = "data/memory_v2.sqlite") -> None:
         self.db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
+        # Whether the sqlite-vec extension was successfully loaded. Set during
+        # start() so search_semantic can pick the optimal path.
+        self._vec_available: bool = False
 
     async def start(self) -> None:
         async with self._lock:
@@ -62,7 +78,65 @@ class SQLiteMemoryRepository(MemoryRepository):
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)"
             )
+            # Embeddings table. The vector is stored as a serialized blob so
+            # the in-Python fallback can decode it without any extension. When
+            # sqlite-vec is available we additionally register a virtual table
+            # that mirrors this data for native KNN search.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_embeddings (
+                    memory_id TEXT PRIMARY KEY,
+                    embedding TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_embeddings_dim "
+                "ON memory_embeddings(dimension)"
+            )
+            self._vec_available = try_load_sqlite_vec(self._conn)
+            if self._vec_available:
+                self._init_vec_virtual_table()
             self._conn.commit()
+
+    def _init_vec_virtual_table(self) -> None:
+        """Create the sqlite-vec virtual table used for native KNN search.
+
+        The dimension is fixed at creation time. We use 0 as a sentinel and
+        let the first indexed embedding define the real dimension; sqlite-vec
+        requires the dimension at CREATE time, so we defer virtual-table
+        creation until the first embedding is indexed (see _ensure_vec_table).
+        """
+        # Intentionally a no-op here; the table is created lazily once we
+        # know the embedding dimension. This avoids a chicken-and-egg problem
+        # where the table is created with a wrong dimension before any
+        # embedding has been seen.
+        return None
+
+    def _ensure_vec_table(self, dimension: int) -> None:
+        """Lazily create the sqlite-vec virtual table for ``dimension``.
+
+        Called the first time an embedding of a given dimension is indexed.
+        Subsequent calls with the same dimension are no-ops.
+        """
+        if not self._vec_available or self._conn is None:
+            return
+        # sqlite-vec virtual tables are named vec_<dim> so multiple dimensions
+        # can coexist if a deployment upgrades its embedding model.
+        table = f"vec_memories_{dimension}"
+        try:
+            self._conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} "
+                "USING vec0(memory_id TEXT PRIMARY KEY, embedding float[{dimension}])"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            # If the virtual table cannot be created (e.g. dimension mismatch
+            # from a prior schema), silently fall back to the in-Python path.
+            self._vec_available = False
 
     async def stop(self) -> None:
         async with self._lock:
@@ -312,3 +386,170 @@ class SQLiteMemoryRepository(MemoryRepository):
                     "SELECT COUNT(*) AS n FROM memories WHERE archived = 0"
                 ).fetchone()
         return int(row["n"])
+
+    async def index_embedding(
+        self,
+        memory_id: str,
+        embedding: list[float],
+    ) -> None:
+        """Persist (or replace) the embedding vector for ``memory_id``.
+
+        Idempotent: re-indexing overwrites the prior vector. When sqlite-vec
+        is available the vector is also upserted into the dimension-specific
+        virtual table for native KNN search.
+        """
+        if not embedding:
+            raise ValueError("embedding must be a non-empty list of floats")
+        dimension = len(embedding)
+        blob = serialize_vector(embedding)
+        async with self._lock:
+            conn = self._require_conn()
+            if self._vec_available:
+                self._ensure_vec_table(dimension)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO memory_embeddings (
+                        memory_id, embedding, dimension, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(memory_id) DO UPDATE SET
+                        embedding = excluded.embedding,
+                        dimension = excluded.dimension,
+                        created_at = excluded.created_at
+                    """,
+                    (memory_id, blob, dimension, utc_now_iso()),
+                )
+                if self._vec_available:
+                    table = f"vec_memories_{dimension}"
+                    # sqlite-vec upsert: delete-then-insert avoids needing
+                    # ON CONFLICT support in the virtual table.
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE memory_id = ?",
+                        (memory_id,),
+                    )
+                    conn.execute(
+                        f"INSERT INTO {table} (memory_id, embedding) VALUES (?, ?)",
+                        (memory_id, _vec_pack(embedding)),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    async def search_semantic(
+        self,
+        query_embedding: list[float],
+        *,
+        limit: int = 8,
+        include_archived: bool = False,
+    ) -> list[MemoryRecord]:
+        """Return the top-K memories most similar to ``query_embedding``.
+
+        Uses the sqlite-vec virtual table when available; otherwise falls back
+        to an in-Python cosine-similarity scan over the ``memory_embeddings``
+        table. Both paths join back to ``memories`` so archived filtering and
+        row decoding are identical.
+        """
+        if not query_embedding:
+            raise ValueError("query_embedding must be a non-empty list")
+        limit = max(1, int(limit))
+        dimension = len(query_embedding)
+
+        async with self._lock:
+            conn = self._require_conn()
+            if self._vec_available:
+                records = self._vec_search(
+                    conn, query_embedding, dimension, limit, include_archived
+                )
+                if records is not None:
+                    return records
+                # Fall through to the in-Python path if the virtual table for
+                # this dimension does not exist yet (no embeddings indexed).
+            return self._python_search(
+                conn, query_embedding, dimension, limit, include_archived
+            )
+
+    def _vec_search(
+        self,
+        conn: sqlite3.Connection,
+        query_embedding: list[float],
+        dimension: int,
+        limit: int,
+        include_archived: bool,
+    ) -> list[MemoryRecord] | None:
+        """Native KNN search via sqlite-vec. Returns None if the virtual
+        table for this dimension does not exist (caller falls back)."""
+        table = f"vec_memories_{dimension}"
+        try:
+            rows = conn.execute(
+                f"SELECT memory_id FROM {table} "
+                "WHERE embedding MATCH ? AND k = ? "
+                "ORDER BY distance",
+                (_vec_pack(query_embedding), limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        if not rows:
+            return []
+        ids = [row["memory_id"] for row in rows]
+        # Preserve KNN order when fetching the full records.
+        placeholders = ",".join("?" for _ in ids)
+        archived_clause = "" if include_archived else "AND archived = 0"
+        ordered = conn.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders}) {archived_clause}",
+            ids,
+        ).fetchall()
+        by_id = {row["id"]: row for row in ordered}
+        return [
+            self._row_to_record(by_id[memory_id])
+            for memory_id in ids
+            if memory_id in by_id
+        ]
+
+    def _python_search(
+        self,
+        conn: sqlite3.Connection,
+        query_embedding: list[float],
+        dimension: int,
+        limit: int,
+        include_archived: bool,
+    ) -> list[MemoryRecord]:
+        """In-Python cosine-similarity fallback.
+
+        Loads embeddings of the matching dimension and computes similarity in
+        Python. Suitable for small-to-medium memory stores; for large stores
+        install sqlite-vec to enable native KNN search.
+        """
+        archived_clause = "" if include_archived else "AND m.archived = 0"
+        rows = conn.execute(
+            f"""
+            SELECT m.*, e.embedding
+            FROM memories m
+            JOIN memory_embeddings e ON e.memory_id = m.id
+            WHERE e.dimension = ? {archived_clause}
+            """,
+            (dimension,),
+        ).fetchall()
+        scored: list[tuple[float, sqlite3.Row]] = []
+        for row in rows:
+            candidate = deserialize_vector(row["embedding"])
+            score = cosine_similarity(query_embedding, candidate)
+            scored.append((score, row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [self._row_to_record(row) for _, row in scored[:limit]]
+
+    async def count_embeddings(self) -> int:
+        async with self._lock:
+            conn = self._require_conn()
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM memory_embeddings"
+            ).fetchone()
+        return int(row["n"])
+
+
+def _vec_pack(vec: list[float]) -> bytes:
+    """Pack a float vector into the little-endian float32 blob sqlite-vec expects."""
+    import struct
+
+    return struct.pack(f"<{len(vec)}f", *vec)

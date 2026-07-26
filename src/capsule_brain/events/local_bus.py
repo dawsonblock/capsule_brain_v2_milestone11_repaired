@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
 
+from capsule_brain.observability.tracing import get_default_tracer
 from capsule_brain.runtime.service import (
     CapsuleService,
     HealthStatus,
@@ -88,28 +89,41 @@ class LocalEventBus(CapsuleService):
             self._published += 1
 
         all_handlers = handlers + wildcard
-        for handler in all_handlers:
-            try:
-                result = handler(event)
-                if inspect.isawaitable(result):
-                    if self._async_dispatch and self._task_registry is not None:
-                        # Dispatch as a managed background task so publish()
-                        # returns immediately. This prevents long-running
-                        # handlers (e.g. reflection) from blocking event
-                        # publication.
-                        self._task_registry.spawn(
-                            _run_handler_safely(result, handler, event, self),
-                            name=f"event:{event.event_type}",
-                        )
-                    else:
-                        await result
-            except Exception:
-                self._handler_failures += 1
-                log.exception(
-                    "Event handler failed: event_type=%s handler=%r",
-                    event.event_type,
-                    handler,
-                )
+        # Wrap publication in a tracing span keyed by the event's correlation
+        # id so the full handler fan-out is visible in the trace waterfall.
+        tracer = get_default_tracer()
+        with tracer.span(
+            f"event.publish:{event.event_type}",
+            correlation_id=event.correlation_id,
+            attributes={
+                "event_type": event.event_type,
+                "event_source": event.source,
+                "handler_count": len(all_handlers),
+            },
+        ) as span:
+            for handler in all_handlers:
+                try:
+                    result = handler(event)
+                    if inspect.isawaitable(result):
+                        if self._async_dispatch and self._task_registry is not None:
+                            # Dispatch as a managed background task so publish()
+                            # returns immediately. This prevents long-running
+                            # handlers (e.g. reflection) from blocking event
+                            # publication.
+                            self._task_registry.spawn(
+                                _run_handler_safely(result, handler, event, self),
+                                name=f"event:{event.event_type}",
+                            )
+                        else:
+                            await result
+                except Exception:
+                    self._handler_failures += 1
+                    span.add_event("handler_failed", {"handler": repr(handler)})
+                    log.exception(
+                        "Event handler failed: event_type=%s handler=%r",
+                        event.event_type,
+                        handler,
+                    )
 
     async def health(self) -> HealthStatus:
         return HealthStatus(

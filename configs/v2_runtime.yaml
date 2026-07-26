@@ -1,8 +1,23 @@
 event_bus: {}
 
 
+# Distributed tracing. When enabled and opentelemetry is installed, spans are
+# exported to OTel-compatible backends (Jaeger, Phoenix, etc.). Always safe to
+# enable — degrades to no-op when opentelemetry is not installed.
+tracing:
+  enable: false
+  service_name: capsule-brain
+
 memory:
   db_path: data/memory_v2.sqlite
+  # Semantic vector search. auto_index_embeddings writes an embedding for
+  # every new memory so search_semantic has data to work with. The default
+  # hash embedding provider is a zero-dependency fallback; configure a real
+  # embedding model for production-quality semantic retrieval.
+  auto_index_embeddings: true
+  embedding:
+    provider: hash
+    dimension: 128
 
 memory_consolidator:
   enable: true
@@ -70,6 +85,12 @@ conversation:
   model: null
   history_limit: 12
   memory_limit: 8
+  # Semantic memory retrieval. When true, the conversation service embeds the
+  # user's message and retrieves the top-K semantically similar memories
+  # instead of the most recent K. Falls back to chronological retrieval if
+  # semantic search is unavailable.
+  semantic_memory: false
+  semantic_memory_limit: 8
   system_prompt: "You are Capsule Brain, a precise autonomous AI assistant."
 
 goal_planner:
@@ -126,3 +147,11 @@ execution:
   # When true, digest resolution MUST succeed — failure is a hard error,
   # not a silent fallback to a mutable tag.
   container_pin_image_digest: true
+
+  # Bounded async worker pool. Limits concurrent container/host executions
+  # to prevent Docker daemon CPU/RAM thrashing under heavy multi-task load.
+  # Set max_workers to 0 to disable the pool and use direct runner.run().
+  worker_pool:
+    max_workers: 2
+    queue_max: 0  # 0 = unbounded queue
+    drain_timeout_s: 10.0

@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
 
 from capsule_brain.events.local_bus import LocalEventBus
 from capsule_brain.events.models import EventEnvelope
 from capsule_brain.llm.gateway import LLMGateway
-from capsule_brain.llm.models import LLMRequest
 from capsule_brain.memory.models import MemoryType
 from capsule_brain.memory.service import MemoryService
 from capsule_brain.runtime.service import CapsuleService, HealthStatus, ServiceState
 
 from .models import ReflectionIteration, ReflectionSession, utc_now_iso
 from .repository import ReflectionRepository
+from .strategies import (
+    DefaultReflectionStrategy,
+    ReflectionStrategy,
+    StrategyContext,
+    select_strategy,
+)
 
 log = logging.getLogger(__name__)
 
@@ -53,9 +57,33 @@ class ReflectionService(CapsuleService):
         # (critique, revise, evaluate); without a cap, degraded providers can
         # block for minutes per session.
         self.session_timeout_s = float(self.cfg.get("session_timeout_s", 60.0))
+        # Adaptive reflection strategies. The default registry covers the
+        # built-in strategies; callers can override via cfg["strategies"] or
+        # by passing a custom dict. Strategy selection happens per-reflection
+        # based on the trigger source/metadata.
+        self._strategies: dict[str, ReflectionStrategy] = self._build_strategies()
         self._unsubscribers: list = []
         self._runs = 0
         self._failures = 0
+        # Per-strategy invocation counts for health/metrics.
+        self._strategy_runs: dict[str, int] = {}
+
+    def _build_strategies(self) -> dict[str, ReflectionStrategy]:
+        from .strategies import (
+            CodeSyntaxStrategy,
+            OperatorFeedbackStrategy,
+            PytestFailureStrategy,
+        )
+
+        return {
+            "default": DefaultReflectionStrategy(),
+            "code_syntax": CodeSyntaxStrategy(),
+            "pytest_failure": PytestFailureStrategy(),
+            "operator_feedback": OperatorFeedbackStrategy(),
+        }
+
+    def register_strategy(self, name: str, strategy: ReflectionStrategy) -> None:
+        self._strategies[name] = strategy
 
     async def start(self) -> None:
         self.state = ServiceState.STARTING
@@ -213,43 +241,36 @@ class ReflectionService(CapsuleService):
         )
         await self.repository.save(session)
 
+        # Select an adaptive strategy based on the trigger source/metadata.
+        # Falls back to the default critique->revise->evaluate loop when no
+        # specialized strategy matches.
+        strategy = select_strategy(
+            source,
+            dict(metadata or {}),
+            strategies=self._strategies,
+        )
+        self._strategy_runs[strategy.name] = self._strategy_runs.get(strategy.name, 0) + 1
+        ctx = StrategyContext(
+            seed=seed,
+            source=source,
+            metadata=dict(metadata or {}),
+            session=session,
+        )
+
         current = seed
-        prior_revisions: set[str] = {self._normalize(seed)}
 
         try:
             async with asyncio.timeout(self.session_timeout_s):
-                for idx in range(self.max_iterations):
-                    critique = await self._critique(current)
-                    revision = await self._revise(current, critique)
-                    evaluation = await self._evaluate(current, revision, critique)
-
-                    resolved = self._is_resolved(evaluation)
-                    iteration = ReflectionIteration(
-                        index=idx,
-                        critique=critique,
-                        revision=revision,
-                        evaluation=evaluation,
-                        resolved=resolved,
-                    )
-                    session.iterations.append(iteration)
-                    await self.repository.save(session)
-
-                    normalized = self._normalize(revision)
-                    if resolved:
-                        session.final_text = revision
-                        session.stop_reason = "resolved"
-                        break
-
-                    if normalized in prior_revisions:
-                        session.final_text = revision
-                        session.stop_reason = "duplicate_revision"
-                        break
-
-                    prior_revisions.add(normalized)
-                    current = revision
-                else:
-                    session.final_text = current
-                    session.stop_reason = "max_iterations"
+                iterations, final_text, stop_reason = await strategy.run(
+                    self.llm,
+                    ctx,
+                    max_iterations=self.max_iterations,
+                    route=self.route,
+                    model=self.model,
+                )
+                session.iterations = iterations
+                session.final_text = final_text
+                session.stop_reason = stop_reason
         except TimeoutError:
             # Session-level wall-clock budget exhausted. Preserve the latest
             # revision so partial work is not lost.
@@ -268,11 +289,12 @@ class ReflectionService(CapsuleService):
             text=session.final_text or session.seed,
             type=MemoryType.REFLECTION,
             source="reflection",
-            tags=["reflection", session.source],
+            tags=["reflection", session.source, f"strategy:{strategy.name}"],
             metadata={
                 "reflection_session_id": session.id,
                 "stop_reason": session.stop_reason,
                 "iterations": len(session.iterations),
+                "strategy": strategy.name,
             },
         )
 
@@ -287,67 +309,12 @@ class ReflectionService(CapsuleService):
                     "final_text": session.final_text,
                     "stop_reason": session.stop_reason,
                     "iterations": len(session.iterations),
+                    "strategy": strategy.name,
                 },
             )
         )
 
         return session
-
-    async def _critique(self, thought: str) -> str:
-        result = await self.llm.generate(
-            LLMRequest(
-                model=self.model,
-                temperature=0.2,
-                system=(
-                    "You are a rigorous critic. Identify the single most important "
-                    "flaw, missing assumption, or next step in the thought. Be concise."
-                ),
-                prompt=thought,
-            ),
-            route=self.route,
-        )
-        return result.text.strip()
-
-    async def _revise(self, thought: str, critique: str) -> str:
-        result = await self.llm.generate(
-            LLMRequest(
-                model=self.model,
-                temperature=0.3,
-                system=(
-                    "Revise the thought using the critique. Produce a materially "
-                    "improved version, not commentary about revising it."
-                ),
-                prompt=f"THOUGHT:\n{thought}\n\nCRITIQUE:\n{critique}",
-            ),
-            route=self.route,
-        )
-        return result.text.strip()
-
-    async def _evaluate(self, previous: str, revision: str, critique: str) -> str:
-        result = await self.llm.generate(
-            LLMRequest(
-                model=self.model,
-                temperature=0.0,
-                system=(
-                    "Evaluate whether the revision resolves the critique. "
-                    "Begin with exactly RESOLVED or CONTINUE, followed by one short reason."
-                ),
-                prompt=(
-                    f"PREVIOUS:\n{previous}\n\nCRITIQUE:\n{critique}"
-                    f"\n\nREVISION:\n{revision}"
-                ),
-            ),
-            route=self.route,
-        )
-        return result.text.strip()
-
-    @staticmethod
-    def _is_resolved(evaluation: str) -> bool:
-        return evaluation.strip().upper().startswith("RESOLVED")
-
-    @staticmethod
-    def _normalize(text: str) -> str:
-        return re.sub(r"\s+", " ", text).strip().lower()
 
     async def health(self) -> HealthStatus:
         state = (
@@ -365,5 +332,7 @@ class ReflectionService(CapsuleService):
                 else 0,
                 "max_iterations": self.max_iterations,
                 "db_path": str(self.repository.db_path),
+                "strategies": sorted(self._strategies),
+                "strategy_runs": dict(self._strategy_runs),
             },
         )

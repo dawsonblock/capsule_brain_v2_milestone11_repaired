@@ -188,7 +188,12 @@ class ContainerExecutionRunner:
             "none",
             # Suppress .pyc writes — the workspace is mounted read-only and
             # Python's default __pycache__ writes would fail with EACCES.
+            # PYTHONDONTWRITEBYTECODE disables .pyc emission entirely; the
+            # PYTHONPYCACHEPREFIX redirect is a belt-and-suspenders control
+            # for interpreters that ignore the bytecode flag in some code
+            # paths (e.g. extension imports under importlib).
             "--env", "PYTHONDONTWRITEBYTECODE=1",
+            "--env", "PYTHONPYCACHEPREFIX=/tmp/pycache",
             "--user",
             self.user,
             "--memory",
