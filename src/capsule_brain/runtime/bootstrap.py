@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from capsule_brain.core.goal_planner_v2 import GoalPlannerV2
@@ -9,6 +10,49 @@ from capsule_brain.memory.service import MemoryService
 from capsule_brain.runtime.application import CapsuleApplication
 
 Decomposer = Callable[[str], Awaitable[list[str]]]
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    """Load a YAML configuration file and validate basic consistency.
+
+    This is the canonical config-loading entry point. It catches the most
+    common configuration error — enabling LLM-dependent services without the
+    LLM gateway — before runtime startup.
+    """
+    import yaml
+
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+
+    _validate_config(cfg)
+    return cfg
+
+
+def _validate_config(cfg: dict[str, Any]) -> None:
+    """Validate configuration consistency before building the application."""
+    llm_enabled = cfg.get("llm_gateway", {}).get("enable", False)
+
+    # LLM-dependent services that are explicitly enabled require the LLM gateway.
+    for service in ("conversation", "feedback", "reflection"):
+        service_cfg = cfg.get(service, {})
+        if service_cfg.get("enable", False) and not llm_enabled:
+            raise ValueError(
+                f"{service}.enable is true but llm_gateway.enable is false. "
+                f"Either enable llm_gateway or set {service}.enable to false."
+            )
+
+    # Host execution requires explicit unsafe opt-in
+    exec_cfg = cfg.get("execution", {})
+    if (
+        exec_cfg.get("enable", False)
+        and exec_cfg.get("runner", "container") == "host"
+        and not exec_cfg.get("unsafe_allow_host_execution", False)
+    ):
+        raise ValueError(
+            "execution.runner is 'host' but unsafe_allow_host_execution is not "
+            "set. Host execution is dangerous — set unsafe_allow_host_execution: "
+            "true to acknowledge the risk, or use runner: container."
+        )
 
 
 async def default_decomposer(goal_text: str) -> list[str]:
@@ -124,6 +168,10 @@ def build_application(
             llm=gateway,
             memory=memory,
             cfg=reflection_cfg,
+            experience_store=experience_store,
+            conversation_repository=(
+                conversation.repository if conversation else None
+            ),
         )
         app.services.register(
             reflection,
@@ -131,11 +179,12 @@ def build_application(
         )
 
     execution_cfg = cfg.get("execution", {})
+    execution = None
     if execution_cfg.get("enable", False):
         from capsule_brain.execution.service import ExecutionService
 
         runner = None
-        if execution_cfg.get("runner", "host") == "container":
+        if execution_cfg.get("runner", "container") == "container":
             from capsule_brain.execution.container_runner import (
                 ContainerExecutionRunner,
             )
@@ -201,8 +250,12 @@ def build_application(
         verification = VerificationService(
             event_bus=bus,
             cfg=verification_cfg,
+            execution_service=execution,
         )
-        app.services.register(verification, requires=["event_bus"])
+        requires = ["event_bus"]
+        if execution is not None:
+            requires.append("execution")
+        app.services.register(verification, requires=requires)
 
     goal_planner = GoalPlannerV2(
         event_bus=bus,

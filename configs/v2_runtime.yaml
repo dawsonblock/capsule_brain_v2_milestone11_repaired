@@ -10,6 +10,20 @@ memory_consolidator:
   archive_after_days: 7
   max_scan: 1000
 
+# ---------------------------------------------------------------------------
+# LLM Gateway
+#
+# The default shipped configuration is an OFFLINE MINIMAL RUNTIME: the LLM
+# gateway is disabled and all LLM-dependent services (conversation, feedback,
+# reflection) are also disabled. This configuration boots cleanly without any
+# API key or network access and provides: event bus, memory, memory
+# consolidation, experience store, verification, goal planning, and (if
+# enabled) execution.
+#
+# To run the full cognitive pipeline, set llm_gateway.enable: true and provide
+# OPENAI_API_KEY in the environment. Conversation, feedback, and reflection
+# will auto-enable when the LLM gateway is available.
+# ---------------------------------------------------------------------------
 llm_gateway:
   enable: false
   default_model: openai_gpt4o_mini
@@ -46,8 +60,11 @@ llm_gateway:
       output_cost_per_million: 0.0
 
 
+# LLM-dependent services. These default to disabled in the offline runtime.
+# When llm_gateway.enable is true, they auto-enable unless explicitly set to
+# false here.
 conversation:
-  enable: true
+  enable: false
   db_path: data/conversations_v2.sqlite
   route: chat
   model: null
@@ -71,11 +88,11 @@ learning:
   db_path: data/experience_v2.sqlite
 
 feedback:
-  enable: true
+  enable: false
 
 
 reflection:
-  enable: true
+  enable: false
   db_path: data/reflections_v2.sqlite
   route: reflection
   model: null
@@ -89,7 +106,10 @@ verification:
 execution:
   enable: false
   allow: false
-  runner: host
+  # Container is the safe default. Host execution requires explicit opt-in:
+  #   runner: host
+  #   unsafe_allow_host_execution: true
+  runner: container
   db_path: data/execution_v2.sqlite
   cwd_root: sandbox
   timeout_s: 10
@@ -103,4 +123,6 @@ execution:
   container_cpus: "1.0"
   container_pids_limit: 128
   container_nofile_limit: 1024
+  # When true, digest resolution MUST succeed — failure is a hard error,
+  # not a silent fallback to a mutable tag.
   container_pin_image_digest: true

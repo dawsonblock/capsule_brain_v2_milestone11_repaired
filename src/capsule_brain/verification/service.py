@@ -35,6 +35,7 @@ class VerificationService(CapsuleService):
         cfg: dict[str, Any] | None = None,
         repository: VerificationRepository | None = None,
         verifiers: list[Verifier] | None = None,
+        execution_service: Any | None = None,
     ) -> None:
         super().__init__(cfg)
         self.event_bus = event_bus
@@ -47,13 +48,35 @@ class VerificationService(CapsuleService):
                 )
             )
         )
-        self.verifiers = verifiers or [
-            NonEmptyVerifier(),
-            PythonSyntaxVerifier(),
-            JSONSyntaxVerifier(),
-            RequiredFieldsVerifier(),
-            ConsistencyVerifier(),
-        ]
+        self.execution_service = execution_service
+
+        if verifiers is not None:
+            self.verifiers = verifiers
+        else:
+            self.verifiers = [
+                NonEmptyVerifier(),
+                PythonSyntaxVerifier(),
+                JSONSyntaxVerifier(),
+                RequiredFieldsVerifier(),
+                ConsistencyVerifier(),
+            ]
+            # When an ExecutionService is available, add execution-backed
+            # verifiers so verification can actually compile/run code rather
+            # than relying on static checks alone.
+            if execution_service is not None:
+                from .execution_verifiers import create_execution_verifiers
+
+                exec_verifier_names = set(
+                    self.cfg.get("execution_verifiers", [])
+                    or ["python_compile", "pytest", "ruff", "mypy"]
+                )
+                self.verifiers.extend(
+                    create_execution_verifiers(
+                        execution_service,
+                        include=exec_verifier_names,
+                    )
+                )
+
         self._unsubscribers: list = []
         self.runs = 0
         self.failures = 0

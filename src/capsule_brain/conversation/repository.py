@@ -264,3 +264,24 @@ class ConversationRepository:
             created_at=row["created_at"],
             metadata=json.loads(row["metadata_json"]),
         )
+
+    async def get_turn(self, turn_id: str) -> Turn | None:
+        async with self._lock:
+            conn = self._require_conn()
+            row = conn.execute(
+                "SELECT * FROM turns WHERE id = ?",
+                (turn_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return Turn(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            role=TurnRole(row["role"]),
+            text=row["text"],
+            created_at=row["created_at"],
+            parent_turn_id=row["parent_turn_id"],
+            metadata=json.loads(row["metadata_json"]),
+        )

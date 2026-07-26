@@ -36,6 +36,23 @@ class LocalEventBus(CapsuleService):
         self._publish_lock = asyncio.Lock()
         self._published = 0
         self._handler_failures = 0
+        # When true, async handlers are dispatched as background tasks via the
+        # task registry instead of awaited inline. This prevents long-running
+        # handlers (e.g. reflection triggering multiple LLM calls) from
+        # blocking event publication. Default is false for backward
+        # compatibility and deterministic test ordering.
+        self._async_dispatch = bool(self.cfg.get("async_dispatch", False))
+        self._task_registry: Any = None
+
+    def set_task_registry(self, registry: Any) -> None:
+        """Attach a TaskRegistry for async dispatch mode.
+
+        When set, async handlers are spawned as managed tasks instead of
+        awaited inline, providing backpressure isolation for long-running
+        reactions.
+        """
+        self._task_registry = registry
+        self._async_dispatch = True
 
     async def start(self) -> None:
         self.state = ServiceState.RUNNING
@@ -70,11 +87,22 @@ class LocalEventBus(CapsuleService):
             wildcard = list(self._handlers.get("*", ()))
             self._published += 1
 
-        for handler in handlers + wildcard:
+        all_handlers = handlers + wildcard
+        for handler in all_handlers:
             try:
                 result = handler(event)
                 if inspect.isawaitable(result):
-                    await result
+                    if self._async_dispatch and self._task_registry is not None:
+                        # Dispatch as a managed background task so publish()
+                        # returns immediately. This prevents long-running
+                        # handlers (e.g. reflection) from blocking event
+                        # publication.
+                        self._task_registry.spawn(
+                            _run_handler_safely(result, handler, event, self),
+                            name=f"event:{event.event_type}",
+                        )
+                    else:
+                        await result
             except Exception:
                 self._handler_failures += 1
                 log.exception(
@@ -90,5 +118,24 @@ class LocalEventBus(CapsuleService):
                 "published": self._published,
                 "handler_failures": self._handler_failures,
                 "subscriptions": sum(len(v) for v in self._handlers.values()),
+                "async_dispatch": self._async_dispatch,
             },
+        )
+
+
+async def _run_handler_safely(
+    awaitable: Any,
+    handler: EventHandler,
+    event: EventEnvelope,
+    bus: LocalEventBus,
+) -> None:
+    """Run an async handler coroutine with error isolation."""
+    try:
+        await awaitable
+    except Exception:
+        bus._handler_failures += 1
+        log.exception(
+            "Async event handler failed: event_type=%s handler=%r",
+            event.event_type,
+            handler,
         )

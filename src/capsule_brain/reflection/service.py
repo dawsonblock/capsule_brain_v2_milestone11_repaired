@@ -25,6 +25,9 @@ class ReflectionService(CapsuleService):
         memory: MemoryService,
         cfg: dict[str, Any] | None = None,
         repository: ReflectionRepository | None = None,
+        experience_store: Any | None = None,
+        conversation_repository: Any | None = None,
+        verification_repository: Any | None = None,
     ) -> None:
         super().__init__(cfg)
         self.event_bus = event_bus
@@ -33,6 +36,11 @@ class ReflectionService(CapsuleService):
         self.repository = repository or ReflectionRepository(
             self.cfg.get("db_path", "data/reflections_v2.sqlite")
         )
+        # Context resolvers for building rich reflection seeds. When available,
+        # reflection gets the actual failed artifact/response, not just IDs.
+        self.experience_store = experience_store
+        self.conversation_repository = conversation_repository
+        self.verification_repository = verification_repository
         self.model = self.cfg.get("model")
         self.route = self.cfg.get("route", "reflection")
         self.max_iterations = max(1, int(self.cfg.get("max_iterations", 4)))
@@ -71,16 +79,44 @@ class ReflectionService(CapsuleService):
             return
         text = str(event.payload.get("text") or event.payload.get("reason") or "").strip()
         response_id = str(event.payload.get("response_id", ""))
-        seed = (
-            f"Review the response associated with response_id={response_id}. "
-            f"Operator feedback: {classification}. {text}"
-        ).strip()
+
+        # Resolve the actual response text so the model can reason about the
+        # real artifact, not an opaque ID.
+        response_text = await self._resolve_response_text(response_id)
+        user_message = await self._resolve_user_message(response_id)
+
+        parts = []
+        if user_message:
+            parts.append(f"USER:\n{user_message}")
+        if response_text:
+            parts.append(f"ASSISTANT RESPONSE:\n{response_text}")
+        parts.append(f"OPERATOR FEEDBACK:\n{classification}: {text}")
+        parts.append(
+            "TASK: Identify why the response failed and produce a corrected response."
+        )
+        seed = "\n\n".join(parts)
         await self._safe_run(seed, "feedback", dict(event.payload))
 
     async def _on_verification_failed(self, event: EventEnvelope) -> None:
-        seed = str(event.payload.get("summary", "")).strip()
-        if not seed:
-            seed = f"Analyze verifier failure: {event.payload}"
+        # Build a rich seed with the actual failed artifact, not just the
+        # summary. The subject (code/text) is the most important information
+        # for debugging.
+        summary = str(event.payload.get("summary", "")).strip()
+        subject = str(event.payload.get("subject", "")).strip()
+        source = str(event.payload.get("source", "")).strip()
+        metadata = event.payload.get("metadata") or {}
+
+        parts = []
+        if summary:
+            parts.append(f"VERIFIER FAILURE:\n{summary}")
+        if subject:
+            parts.append(f"ARTIFACT:\n{subject}")
+        if metadata:
+            parts.append(f"CHECK DETAILS:\n{metadata}")
+        parts.append(
+            "TASK: Analyze the failure and produce a corrected version of the artifact."
+        )
+        seed = "\n\n".join(parts) if parts else f"Analyze verifier failure: {event.payload}"
         await self._safe_run(seed, "verification", dict(event.payload))
 
     async def _on_goal_unresolved(self, event: EventEnvelope) -> None:
@@ -88,6 +124,52 @@ class ReflectionService(CapsuleService):
         if not seed:
             seed = f"Analyze unresolved goal: {event.payload}"
         await self._safe_run(seed, "goal", dict(event.payload))
+
+    async def _resolve_response_text(self, response_id: str) -> str | None:
+        """Resolve a response_id to the actual assistant response text."""
+        if not response_id or not response_id.strip():
+            return None
+        # Try ExperienceStore first (it has the full response + provenance)
+        if self.experience_store is not None:
+            try:
+                record = await self.experience_store.get_by_response_id(response_id)
+                if record is not None:
+                    return record.response_text
+            except Exception:
+                pass
+        # Fall back to ConversationRepository
+        if self.conversation_repository is not None:
+            try:
+                response = await self.conversation_repository.get_response(response_id)
+                if response is not None:
+                    return response.text
+            except Exception:
+                pass
+        return None
+
+    async def _resolve_user_message(self, response_id: str) -> str | None:
+        """Resolve the user message that preceded a given response_id."""
+        if not response_id or not response_id.strip():
+            return None
+        if self.experience_store is not None:
+            try:
+                record = await self.experience_store.get_by_response_id(response_id)
+                if record is not None:
+                    return record.prompt_text
+            except Exception:
+                pass
+        if self.conversation_repository is not None:
+            try:
+                response = await self.conversation_repository.get_response(response_id)
+                if response is not None:
+                    turn = await self.conversation_repository.get_turn(
+                        response.parent_turn_id
+                    )
+                    if turn is not None:
+                        return turn.text
+            except Exception:
+                pass
+        return None
 
     async def _safe_run(self, seed: str, source: str, metadata: dict[str, Any]) -> None:
         try:

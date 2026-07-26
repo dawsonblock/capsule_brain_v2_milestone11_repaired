@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 from ._bounded import run_bounded
 from .models import ExecutionRequest, ExecutionResult, now
 from .policy import ExecutionPolicyError, validate_request
+
+
+class ContainerImageResolutionError(ExecutionPolicyError):
+    """Raised when digest pinning is enabled but resolution fails.
+
+    A security control named ``pin_image_digest`` must fail closed — if the
+    digest cannot be resolved, the run must not proceed with a mutable tag.
+    """
 
 
 def _format_volume_mount(host_path: str) -> str:
@@ -36,8 +47,9 @@ def _is_digest_pinned(image: str) -> bool:
 def _resolve_digest(engine: str, image: str) -> str:
     """Resolve a floating tag to an immutable digest.
 
-    Returns the original image unchanged if the engine cannot resolve it
-    (e.g. offline); pinning is a hardening measure, not a gate.
+    Raises ``ContainerImageResolutionError`` if resolution fails. Pinning is
+    a security control — it must fail closed, not silently fall back to a
+    mutable tag.
     """
     if _is_digest_pinned(image):
         return image
@@ -48,14 +60,47 @@ def _resolve_digest(engine: str, image: str) -> str:
             timeout=30,
             check=False,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return image
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise ContainerImageResolutionError(
+            f"Failed to resolve digest for {image!r}: {exc}. "
+            f"Set pin_image_digest=false to allow mutable tags."
+        ) from exc
     if completed.returncode != 0:
-        return image
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ContainerImageResolutionError(
+            f"Failed to resolve digest for {image!r}: "
+            f"engine returned exit code {completed.returncode}. "
+            f"Set pin_image_digest=false to allow mutable tags."
+        )
     digest = completed.stdout.decode("utf-8", errors="replace").strip()
     if not digest or "@" not in digest:
-        return image
+        raise ContainerImageResolutionError(
+            f"Engine returned no digest for {image!r}: got {digest!r}. "
+            f"Set pin_image_digest=false to allow mutable tags."
+        )
     return digest
+
+
+def _kill_container(engine: str, cid: str) -> None:
+    """Kill and remove a container by ID. Best-effort — errors are logged."""
+    try:
+        subprocess.run(
+            [engine, "kill", cid],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            [engine, "rm", "-f", cid],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        pass
 
 
 class ContainerExecutionRunner:
@@ -63,7 +108,9 @@ class ContainerExecutionRunner:
 
     Docker/Podman is invoked as a subprocess. The workspace is read-only,
     networking is disabled, execution is non-root, and CPU/RAM/PID limits
-    are enforced.
+    are enforced. On timeout, the container is explicitly killed and removed
+    via ``--cidfile`` tracking — killing the Docker CLI process alone does
+    not guarantee the backing container is stopped.
     """
 
     def __init__(
@@ -93,7 +140,7 @@ class ContainerExecutionRunner:
         self.nofile_limit = nofile_limit
         self.user = user
         # When enabled, floating tags are resolved to an immutable digest
-        # before each run so a rebuilt image cannot silently change behavior.
+        # before each run. Resolution MUST succeed — failure is a hard error.
         self.pin_image_digest = pin_image_digest
 
     async def run(
@@ -119,11 +166,24 @@ class ContainerExecutionRunner:
         started_at = now()
         started = time.perf_counter()
 
+        # Use a CID file so we can explicitly kill/remove the container on
+        # timeout. Killing the Docker CLI process does not guarantee the
+        # backing container is stopped.
+        cid_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".cid",
+            delete=False,
+            prefix="capsule_exec_",
+        )
+        cid_file.close()
+        cid_path = cid_file.name
+
         command = [
             self.engine,
             "run",
             "--rm",
             "--init",
+            "--cidfile", cid_path,
             "--network",
             "none",
             "--user",
@@ -160,9 +220,23 @@ class ContainerExecutionRunner:
                 max_output_chars=self.policy.max_output_chars,
             )
 
-        raw = await asyncio.to_thread(
-            execute_container
-        )
+        raw = await asyncio.to_thread(execute_container)
+
+        # If the process timed out, explicitly kill and remove the container
+        # using the CID from the cidfile. This is the only reliable way to
+        # ensure the backing container is stopped — killing the Docker CLI
+        # client process leaves the container running under the daemon.
+        if raw["timed_out"]:
+            cid = _read_cid(cid_path)
+            if cid:
+                await asyncio.to_thread(_kill_container, self.engine, cid)
+
+        # Clean up the CID file
+        try:
+            os.unlink(cid_path)
+        except OSError:
+            pass
+
         cap = self.policy.max_output_chars
 
         def decode(value) -> str:
@@ -197,3 +271,13 @@ class ContainerExecutionRunner:
                 "configured_image": self.image,
             },
         )
+
+
+def _read_cid(cid_path: str) -> str | None:
+    """Read the container ID from a cidfile. Returns None if empty/missing."""
+    try:
+        with open(cid_path) as f:
+            cid = f.read().strip()
+            return cid if cid else None
+    except (OSError, IOError):
+        return None
