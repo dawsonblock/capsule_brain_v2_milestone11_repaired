@@ -71,11 +71,19 @@ class RedisBridge(CapsuleService):
                 )
             )
 
-        self.state = ServiceState.RUNNING
+        # State remains DEGRADED until _listen() establishes the Redis
+        # connection and sets it to RUNNING.
+        self.state = ServiceState.DEGRADED
 
     def _make_outbound_handler(self, topic: str):
         async def handler(event: EventEnvelope) -> None:
             if self._redis is None:
+                self._errors += 1
+                log.warning(
+                    "Redis outbound publish skipped "
+                    "(not connected) for %s",
+                    topic,
+                )
                 return
             try:
                 payload = {

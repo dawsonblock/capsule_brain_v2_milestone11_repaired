@@ -70,7 +70,7 @@ async def run_application(
         log.info("App runner teardown sequence initiating...")
         try:
             await asyncio.wait_for(runtime.stop(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.error(
                 "Runtime stop timed out after 5s; forcing task cancellation."
             )

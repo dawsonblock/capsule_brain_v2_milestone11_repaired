@@ -22,6 +22,7 @@ class TaskRegistry:
     ) -> None:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._event_bus_provider = event_bus_provider
+        self._event_tasks: set[asyncio.Task[Any]] = set()
 
     def spawn(
         self,
@@ -71,7 +72,7 @@ class TaskRegistry:
                 return
         try:
             from capsule_brain.events.models import EventEnvelope
-            asyncio.create_task(
+            evt = asyncio.create_task(
                 bus.publish(
                     EventEnvelope(
                         event_type="system.task.failed",
@@ -84,8 +85,9 @@ class TaskRegistry:
                     )
                 )
             )
+            self._event_tasks.add(evt)
+            evt.add_done_callback(self._event_tasks.discard)
         except Exception:
-            # Don't let event emission errors mask the original failure.
             pass
 
     @property

@@ -17,7 +17,9 @@ class CapsuleApplication:
     def __init__(self, cfg: dict[str, Any] | None = None) -> None:
         self.cfg = dict(cfg or {})
         self.services = ServiceRegistry()
-        self.tasks = TaskRegistry()
+        self.tasks = TaskRegistry(
+            event_bus_provider=lambda: self.services.get("event_bus"),
+        )
         self.shutdown_requested = asyncio.Event()
         self.shutdown_reason: str | None = None
 

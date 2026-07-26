@@ -41,5 +41,18 @@ class MemoryRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def archive_batch(self, memory_ids: list[str]) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def oldest(
+        self,
+        *,
+        limit: int = 100,
+        include_archived: bool = False,
+    ) -> list[MemoryRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
     async def count(self, *, include_archived: bool = False) -> int:
         raise NotImplementedError

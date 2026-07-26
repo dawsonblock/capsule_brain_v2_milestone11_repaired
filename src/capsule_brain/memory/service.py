@@ -96,6 +96,17 @@ class MemoryService(CapsuleService):
             include_archived=include_archived,
         )
 
+    async def oldest(
+        self,
+        *,
+        limit: int = 100,
+        include_archived: bool = False,
+    ) -> list[MemoryRecord]:
+        return await self.repository.oldest(
+            limit=limit,
+            include_archived=include_archived,
+        )
+
     async def archive(self, memory_id: str) -> bool:
         archived = await self.repository.archive(memory_id)
         if archived:
@@ -120,7 +131,7 @@ class MemoryService(CapsuleService):
                 EventEnvelope(
                     event_type="memory.archived_batch",
                     source=self.name,
-                    payload={"count": count, "ids": list(memory_ids)},
+                    payload={"count": count, "requested_ids": list(memory_ids)},
                 )
             )
         return count

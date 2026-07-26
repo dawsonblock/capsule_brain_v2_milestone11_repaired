@@ -189,7 +189,6 @@ class ContainerExecutionRunner:
             # Suppress .pyc writes — the workspace is mounted read-only and
             # Python's default __pycache__ writes would fail with EACCES.
             "--env", "PYTHONDONTWRITEBYTECODE=1",
-            "--env", "PYTHONPYCACHEPREFIX=/tmp/pycache",
             "--user",
             self.user,
             "--memory",
