@@ -118,10 +118,62 @@ Tests: `tests/unit/test_execution_worker_pool.py` (6 tests).
   enabled.
 - `ExecutionWorkerPool` is created and wired into `ExecutionService` when
   `execution.worker_pool.max_workers` > 0.
+- `WorkflowRunnerService` is registered when `workflow.enable` is true, with
+  the default plan->generate->test->reflect workflow pre-registered.
 - `configs/v2_runtime.yaml` updated with `tracing`, `memory.embedding`,
-  `conversation.semantic_memory`, and `execution.worker_pool` sections.
+  `conversation.semantic_memory`, `execution.worker_pool`, and `workflow`
+  sections.
+
+## Improvement 6: WorkflowService DAG Engine (Part 2)
+
+A managed `WorkflowRunnerService` that orchestrates multi-step cognitive
+tasks as a directed acyclic graph with persisted state, conditional edges,
+and human-in-the-loop checkpoints.
+
+- **Models** (`workflow/models.py`): `WorkflowState` (the shared blackboard
+  passed node-to-node), `WorkflowRun` (a persisted run with status + state
+  snapshot + step history), `WorkflowStepRecord` (one node execution), and
+  `WorkflowStatus` enum (PENDING/RUNNING/PAUSED/COMPLETED/FAILED).
+- **Persistence** (`workflow/repository.py`): `WorkflowRepository` with
+  SQLite/WAL storage. One row per run plus one row per step. A run can be
+  resumed at the exact node where it stopped by reading `current_node`.
+  Includes `list_pending_resume()` for crash recovery.
+- **Engine** (`workflow/runner.py`): `WorkflowRunnerService` CapsuleService
+  with `WorkflowNode` (action + conditional edge + optional checkpoint
+  guard) and `Workflow` (named collection of nodes + entry point). The
+  runner:
+  - Executes nodes in order, resolving conditional edges via callable
+    `next_node` functions that inspect state.
+  - Publishes `workflow.started`, `workflow.step`, `workflow.completed`,
+    `workflow.failed`, `workflow.approval_requested`, and
+    `workflow.cancelled` events.
+  - Wraps each node execution in a tracing span keyed by the run's
+    correlation id.
+  - Pauses at checkpoint nodes: emits `workflow.approval_requested`, parks
+    on an `asyncio.Future`, and resumes when `resume_run(approved=True)` is
+    called (via API or the `workflow.approve` event).
+  - Persists state after every node transition so an interrupted run
+    resumes at the exact failed node on restart (`auto_resume` on start).
+  - Enforces a `max_steps` cap to prevent infinite loops from
+    misconfigured conditional edges.
+- **Default workflow** (`workflow/builtins.py`):
+  `build_plan_generate_test_reflect_workflow` produces the canonical
+  Plan -> Generate -> Test -> (Pass? -> [Approve?] -> Complete | Fail? ->
+  Reflect -> loop to Test) DAG. It degrades gracefully when LLMGateway or
+  ExecutionService is unavailable (offline mode produces stubs and treats
+  untested code as a soft pass).
+- **Config**: `workflow.enable`, `workflow.db_path`,
+  `workflow.max_steps`, `workflow.max_reflect_iterations`,
+  `workflow.require_approval`, `workflow.auto_resume`,
+  `workflow.approval_timeout_s`.
+
+Files: `workflow/__init__.py`, `workflow/models.py`,
+`workflow/repository.py`, `workflow/runner.py`, `workflow/builtins.py`,
+`runtime/bootstrap.py`, `configs/v2_runtime.yaml`.
+Tests: `tests/unit/test_workflow_runner.py` (14 tests),
+`tests/unit/test_workflow_builtins.py` (5 tests).
 
 ## Validation
 
 - compileall: PASS
-- pytest: 131 passed (95 pre-existing + 36 new, 1 pre-existing failure fixed)
+- pytest: 150 passed (95 pre-existing + 36 Part 1 + 19 Part 2, 1 pre-existing failure fixed)

@@ -324,6 +324,37 @@ def build_application(
         requirements.append("llm_gateway")
     app.services.register(goal_planner, requires=requirements)
 
+    # WorkflowService (DAG engine). Sits on top of the event bus and other
+    # services. The default plan->generate->test->reflect workflow is
+    # registered when enabled; it gracefully degrades when LLM/execution
+    # services are unavailable.
+    workflow_cfg = cfg.get("workflow", {}) or {}
+    if workflow_cfg.get("enable", False):
+        from capsule_brain.workflow.builtins import (
+            build_plan_generate_test_reflect_workflow,
+        )
+        from capsule_brain.workflow.runner import WorkflowRunnerService
+
+        workflow_runner = WorkflowRunnerService(
+            event_bus=bus,
+            cfg=workflow_cfg,
+        )
+        app.services.register(workflow_runner, requires=["event_bus"])
+
+        # Register the default workflow. The workflow builder reads services
+        # from the registry at execution time (not build time) so it sees
+        # whatever services are currently registered.
+        default_wf = build_plan_generate_test_reflect_workflow(
+            services=app.services,
+            max_iterations=int(
+                workflow_cfg.get("max_reflect_iterations", 3)
+            ),
+            require_approval=bool(
+                workflow_cfg.get("require_approval", False)
+            ),
+        )
+        workflow_runner.register_workflow(default_wf)
+
     redis_cfg = cfg.get("redis_bridge", {})
     if redis_cfg.get("enable", False):
         from capsule_brain.events.redis_bridge import RedisBridge

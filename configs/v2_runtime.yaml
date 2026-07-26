@@ -96,6 +96,20 @@ conversation:
 goal_planner:
   db_path: data/goals_v2.sqlite
 
+# WorkflowService (DAG engine). When enabled, registers a managed
+# WorkflowRunnerService on top of the event bus and provides the default
+# plan->generate->test->reflect workflow. Interrupted runs are persisted to
+# SQLite and resumed on restart. Set require_approval to insert a
+# human-in-the-loop checkpoint before completion.
+workflow:
+  enable: false
+  db_path: data/workflows.sqlite
+  max_steps: 50
+  max_reflect_iterations: 3
+  require_approval: false
+  auto_resume: true
+  approval_timeout_s: 0  # 0 = wait forever for operator approval
+
 redis_bridge:
   enable: false
   url: redis://localhost:6379/0
