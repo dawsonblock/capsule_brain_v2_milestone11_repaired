@@ -23,6 +23,7 @@ class ExecutionService(CapsuleService):
         cfg: dict[str, Any] | None = None,
         repository: ExecutionRepository | None = None,
         runner: Any | None = None,
+        worker_pool: Any | None = None,
     ) -> None:
         super().__init__(cfg)
         self.event_bus = event_bus
@@ -44,6 +45,11 @@ class ExecutionService(CapsuleService):
         self.repository = repository or ExecutionRepository(
             self.cfg.get("db_path", "data/execution_v2.sqlite")
         )
+        # Optional bounded worker pool. When provided, execute() delegates to
+        # the pool so concurrent container/host executions are capped at
+        # pool.max_workers. When None (the default), execute() calls the
+        # runner directly, preserving the original behavior.
+        self.worker_pool = worker_pool
         self._unsubscribers: list = []
         self.runs = 0
         self.failures = 0
@@ -51,6 +57,8 @@ class ExecutionService(CapsuleService):
     async def start(self) -> None:
         self.state = ServiceState.STARTING
         await self.repository.start()
+        if self.worker_pool is not None:
+            await self.worker_pool.start()
         self._unsubscribers.append(
             self.event_bus.subscribe(
                 "execution.request",
@@ -64,6 +72,8 @@ class ExecutionService(CapsuleService):
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
+        if self.worker_pool is not None:
+            await self.worker_pool.stop()
         await self.repository.stop()
         self.state = ServiceState.STOPPED
 
@@ -100,7 +110,13 @@ class ExecutionService(CapsuleService):
         correlation_id: Any = None,
     ) -> ExecutionResult:
         self.runs += 1
-        result = await self.runner.run(request)
+        if self.worker_pool is not None:
+            result = await self.worker_pool.submit(
+                request,
+                correlation_id=correlation_id,
+            )
+        else:
+            result = await self.runner.run(request)
 
         if not result.passed:
             self.failures += 1
@@ -137,24 +153,29 @@ class ExecutionService(CapsuleService):
             if self.state == ServiceState.RUNNING and self.failures > 0
             else self.state
         )
-        return HealthStatus(
-            state=state,
-            details={
-                "runs": self.runs,
-                "failures": self.failures,
-                "allow": self.policy.allow,
-                "timeout_s": self.policy.timeout_s,
-                "cwd_root": self.policy.cwd_root,
-                "allowed_commands": list(
-                    self.policy.allowed_commands
-                ),
-                "result_count": (
-                    await self.repository.count()
-                    if self.state in {
-                        ServiceState.RUNNING,
-                        ServiceState.DEGRADED,
-                    }
-                    else 0
-                ),
-            },
-        )
+        details = {
+            "runs": self.runs,
+            "failures": self.failures,
+            "allow": self.policy.allow,
+            "timeout_s": self.policy.timeout_s,
+            "cwd_root": self.policy.cwd_root,
+            "allowed_commands": list(
+                self.policy.allowed_commands
+            ),
+            "result_count": (
+                await self.repository.count()
+                if self.state in {
+                    ServiceState.RUNNING,
+                    ServiceState.DEGRADED,
+                }
+                else 0
+            ),
+            "worker_pool": self.worker_pool is not None,
+        }
+        if self.worker_pool is not None and self.worker_pool.is_running:
+            try:
+                pool_health = await self.worker_pool.health()
+                details["pool"] = pool_health.details
+            except Exception:
+                pass
+        return HealthStatus(state=state, details=details)

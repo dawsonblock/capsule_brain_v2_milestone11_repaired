@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any
@@ -8,6 +9,7 @@ import httpx
 
 from capsule_brain.llm.errors import LLMConfigurationError, LLMProviderError
 from capsule_brain.llm.models import LLMRequest, LLMResult
+from capsule_brain.llm.tools import ToolCall
 from .base import LLMProvider
 
 
@@ -32,10 +34,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if not api_key:
             raise LLMConfigurationError(f"Missing API key environment variable: {key_env}")
 
-        messages = []
-        if request.system:
-            messages.append({"role": "system", "content": request.system})
-        messages.append({"role": "user", "content": request.prompt})
+        messages = self._build_messages(request)
 
         payload: dict[str, Any] = {
             "model": model_name,
@@ -47,6 +46,12 @@ class OpenAICompatibleProvider(LLMProvider):
             payload["max_tokens"] = request.max_tokens
         if request.response_format == "json":
             payload["response_format"] = {"type": "json_object"}
+        if request.tools:
+            payload["tools"] = [spec.to_openai_schema() for spec in request.tools]
+            # Allow the model to choose when to call tools rather than forcing
+            # or forbidding tool use. Callers can override by setting
+            # ``tool_choice`` in request.metadata if needed.
+            payload.setdefault("tool_choice", "auto")
 
         started = time.perf_counter()
         response = await self.client.post(
@@ -63,9 +68,14 @@ class OpenAICompatibleProvider(LLMProvider):
 
         data = response.json()
         try:
-            text = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            message = choice["message"]
+            text = message.get("content") or ""
+            finish_reason = choice.get("finish_reason")
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMProviderError("Malformed provider response") from exc
+
+        tool_calls = self._parse_tool_calls(message)
 
         usage = data.get("usage", {})
         return LLMResult(
@@ -75,7 +85,58 @@ class OpenAICompatibleProvider(LLMProvider):
             latency_ms=latency_ms,
             usage={k: int(v) for k, v in usage.items() if isinstance(v, int)},
             raw=data,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
+
+    @staticmethod
+    def _build_messages(request: LLMRequest) -> list[dict[str, Any]]:
+        """Build the OpenAI chat messages list from an LLMRequest.
+
+        Includes the system prompt, the user prompt, and any prior tool
+        results (so multi-turn tool-calling loops can continue). Tool results
+        are appended as ``tool`` role messages per the OpenAI spec.
+        """
+        messages: list[dict[str, Any]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        messages.append({"role": "user", "content": request.prompt})
+        for result in request.tool_results:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": result.get("tool_call_id", ""),
+                    "content": str(result.get("content", "")),
+                }
+            )
+        return messages
+
+    @staticmethod
+    def _parse_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
+        """Parse ``message.tool_calls`` into typed ToolCall objects.
+
+        Defends against malformed arguments: if the model returns invalid
+        JSON for a tool's arguments, we substitute an empty dict and let the
+        ToolRegistry's required-key validation surface a clear error rather
+        than crashing the gateway.
+        """
+        raw_calls = message.get("tool_calls") or []
+        calls: list[ToolCall] = []
+        for raw in raw_calls:
+            try:
+                call_id = str(raw.get("id", ""))
+                function = raw.get("function") or {}
+                name = str(function.get("name", ""))
+                args_blob = function.get("arguments", "{}")
+                try:
+                    arguments = json.loads(args_blob) if args_blob else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+                if name:
+                    calls.append(ToolCall(id=call_id, name=name, arguments=arguments))
+            except Exception:
+                continue
+        return calls
 
     async def close(self) -> None:
         if self._owns_client:

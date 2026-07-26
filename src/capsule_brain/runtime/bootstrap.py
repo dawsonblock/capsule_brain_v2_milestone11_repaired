@@ -7,6 +7,7 @@ from capsule_brain.core.goal_planner_v2 import GoalPlannerV2
 from capsule_brain.events.local_bus import LocalEventBus
 from capsule_brain.memory.consolidation import MemoryConsolidator
 from capsule_brain.memory.service import MemoryService
+from capsule_brain.observability.tracing import Tracer, set_default_tracer
 from capsule_brain.runtime.application import CapsuleApplication
 
 Decomposer = Callable[[str], Awaitable[list[str]]]
@@ -72,6 +73,19 @@ def build_application(
     cfg = dict(cfg or {})
     app = CapsuleApplication(cfg)
 
+    # Initialize distributed tracing. When opentelemetry is installed and a
+    # tracer provider is configured, spans are exported to OTel-compatible
+    # backends (Jaeger, Phoenix, etc.). Otherwise the tracer is a no-op with
+    # zero overhead. Tracing is always safe to enable — it degrades gracefully.
+    tracing_cfg = cfg.get("tracing", {}) or {}
+    if tracing_cfg.get("enable", False):
+        tracer = Tracer.otel(
+            service_name=str(tracing_cfg.get("service_name", "capsule-brain"))
+        )
+    else:
+        tracer = Tracer()
+    set_default_tracer(tracer)
+
     bus = LocalEventBus(cfg.get("event_bus", {}))
     app.services.register(bus)
 
@@ -90,6 +104,7 @@ def build_application(
     if llm_cfg.get("enable", False):
         from capsule_brain.llm.gateway import LLMGateway
         from capsule_brain.llm.goal_decomposer import StructuredGoalDecomposer
+        from capsule_brain.llm.tools import ToolRegistry
 
         gateway = LLMGateway(llm_cfg, providers=llm_providers)
         app.services.register(gateway)
@@ -97,6 +112,12 @@ def build_application(
             gateway,
             model=llm_cfg.get("goal_model"),
         )
+        # Tool registry for native function-calling. Registered unconditionally
+        # when the LLM gateway is enabled so services can register tools at
+        # startup. The registry starts empty — services add tools via
+        # registry.register(ToolSpec(...), handler).
+        tool_registry = ToolRegistry()
+        app.services.register(tool_registry)
 
     # ExperienceStore is a standalone SQLite store with no LLM dependency.
     # Register it unconditionally so feedback/conversation can rely on it
@@ -236,10 +257,46 @@ def build_application(
                 ),
             )
 
+        # Bounded async worker pool. When max_workers > 0, execution jobs are
+        # queued and dispatched to at most max_workers concurrent runners,
+        # preventing Docker daemon CPU/RAM thrashing under heavy multi-task
+        # load. Set worker_pool.max_workers to 0 to disable the pool and use
+        # direct runner.run() calls (the original behavior).
+        worker_pool = None
+        pool_cfg = execution_cfg.get("worker_pool", {}) or {}
+        if int(pool_cfg.get("max_workers", 2)) > 0:
+            from capsule_brain.execution.models import ExecutionPolicy
+            from capsule_brain.execution.runner import ExecutionRunner
+            from capsule_brain.execution.worker_pool import (
+                ExecutionWorkerPool,
+            )
+
+            # The runner was already created above for the container case.
+            # For the host case (runner is None), create a default runner
+            # wrapping the same policy the ExecutionService will use.
+            pool_runner = runner or ExecutionRunner(
+                ExecutionPolicy(
+                    allow=bool(execution_cfg.get("allow", False)),
+                    timeout_s=float(execution_cfg.get("timeout_s", 10.0)),
+                    max_output_chars=int(
+                        execution_cfg.get("max_output_chars", 20000)
+                    ),
+                    allowed_commands=tuple(
+                        execution_cfg.get(
+                            "allowed_commands",
+                            ["python", "pytest"],
+                        )
+                    ),
+                    cwd_root=str(execution_cfg.get("cwd_root", "sandbox")),
+                )
+            )
+            worker_pool = ExecutionWorkerPool(pool_runner, pool_cfg)
+
         execution = ExecutionService(
             event_bus=bus,
             cfg=execution_cfg,
             runner=runner,
+            worker_pool=worker_pool,
         )
         app.services.register(execution, requires=["event_bus"])
 
@@ -266,6 +323,37 @@ def build_application(
     if llm_cfg.get("enable", False):
         requirements.append("llm_gateway")
     app.services.register(goal_planner, requires=requirements)
+
+    # WorkflowService (DAG engine). Sits on top of the event bus and other
+    # services. The default plan->generate->test->reflect workflow is
+    # registered when enabled; it gracefully degrades when LLM/execution
+    # services are unavailable.
+    workflow_cfg = cfg.get("workflow", {}) or {}
+    if workflow_cfg.get("enable", False):
+        from capsule_brain.workflow.builtins import (
+            build_plan_generate_test_reflect_workflow,
+        )
+        from capsule_brain.workflow.runner import WorkflowRunnerService
+
+        workflow_runner = WorkflowRunnerService(
+            event_bus=bus,
+            cfg=workflow_cfg,
+        )
+        app.services.register(workflow_runner, requires=["event_bus"])
+
+        # Register the default workflow. The workflow builder reads services
+        # from the registry at execution time (not build time) so it sees
+        # whatever services are currently registered.
+        default_wf = build_plan_generate_test_reflect_workflow(
+            services=app.services,
+            max_iterations=int(
+                workflow_cfg.get("max_reflect_iterations", 3)
+            ),
+            require_approval=bool(
+                workflow_cfg.get("require_approval", False)
+            ),
+        )
+        workflow_runner.register_workflow(default_wf)
 
     redis_cfg = cfg.get("redis_bridge", {})
     if redis_cfg.get("enable", False):
