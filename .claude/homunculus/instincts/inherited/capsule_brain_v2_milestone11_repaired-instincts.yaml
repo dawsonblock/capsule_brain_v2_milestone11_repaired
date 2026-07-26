@@ -1,0 +1,452 @@
+# Instincts generated from https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+# Generated: 2026-07-26T09:13:31.840Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: capsule_brain_v2_milestone11_repaired-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Commit Length
+
+## Action
+
+Write moderate-length commit messages (~84 characters)
+
+## Evidence
+
+- Average commit message length: 84 chars
+- Based on 3 commits
+
+---
+id: capsule_brain_v2_milestone11_repaired-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: capsule_brain_v2_milestone11_repaired-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: capsule_brain_v2_milestone11_repaired-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: capsule_brain_v2_milestone11_repaired-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: capsule_brain_v2_milestone11_repaired-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: capsule_brain_v2_milestone11_repaired-test-types
+trigger: "when planning tests for a feature"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Test Types
+
+## Action
+
+Write unit, integration tests to match project standards
+
+## Evidence
+
+- Test types detected: unit, integration
+- Coverage config: no
+
+---
+id: capsule_brain_v2_milestone11_repaired-workflow-add-new-core-service-with-persistence-and-tests
+trigger: "when doing add new core service with persistence and tests"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Workflow Add New Core Service With Persistence And Tests
+
+## Action
+
+Follow the add-new-core-service-with-persistence-and-tests workflow:
+1. Define or update models in a new or existing models.py file.
+2. Implement repository logic in repository.py (with SQLite or other storage).
+3. Implement service logic in service.py or runner.py.
+4. Wire up the new service in runtime/bootstrap.py and update configs/v2_runtime.yaml as needed.
+5. Add or update __init__.py and supporting files in the new/existing module.
+6. Write new unit tests in tests/unit/ (e.g., test_<feature>.py).
+7. Update documentation or milestone tracking (e.g., MILESTONE_12.md).
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/capsule_brain/<feature>/{models.py,repository.py,service.py,runner.py,__init__.py}, src/capsule_brain/runtime/bootstrap.py, configs/v2_runtime.yaml
+
+---
+id: capsule_brain_v2_milestone11_repaired-workflow-remove-build-artifacts-and-generated-files
+trigger: "when doing remove build artifacts and generated files"
+confidence: 0.55
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Workflow Remove Build Artifacts And Generated Files
+
+## Action
+
+Follow the remove-build-artifacts-and-generated-files workflow:
+1. Identify .pyc and .sqlite* files that are tracked by git.
+2. Remove these files from version control.
+3. Ensure .gitignore covers these patterns.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~1x per month
+- Files: src/**/__pycache__/*.pyc, data/*.sqlite*, tests/unit/__pycache__/*.pyc
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-naming-files
+trigger: "When creating or renaming a file in the codebase"
+confidence: 0.85
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Naming Files
+
+## Action
+
+Name the file using snake_case (e.g., my_module.py)
+
+## Evidence
+
+- Pattern in src/capsule_brain/*/*.py
+- Naming conventions section
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-naming-functions
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Naming Functions
+
+## Action
+
+Name the function using camelCase (e.g., processData)
+
+## Evidence
+
+- Naming conventions: functions use camelCase
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-naming-classes
+trigger: "When defining a new class"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Naming Classes
+
+## Action
+
+Name the class using PascalCase (e.g., DataProcessor)
+
+## Evidence
+
+- Naming conventions: classes use PascalCase
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-naming-constants
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Naming Constants
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE (e.g., MAX_SIZE)
+
+## Evidence
+
+- Naming conventions: constants use SCREAMING_SNAKE_CASE
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-import-style
+trigger: "When importing modules within the package"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- importStyle: relative
+- Pattern in src/capsule_brain/*/*.py
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-export-style
+trigger: "When exporting functions or classes from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Export Style
+
+## Action
+
+Use named exports (explicitly list exports in __init__.py)
+
+## Evidence
+
+- exportStyle: named
+- Pattern in __init__.py files
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Test Location
+
+## Action
+
+Place test files in the separate tests/unit/ directory
+
+## Evidence
+
+- testLocation: separate
+- Pattern in tests/unit/test_*.py
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-test-naming
+trigger: "When naming a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Test Naming
+
+## Action
+
+Use the pattern test_<feature>.py for unit tests
+
+## Evidence
+
+- Pattern in tests/unit/test_<feature>.py
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-test-types
+trigger: "When writing tests"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Test Types
+
+## Action
+
+Write both unit and integration tests as appropriate
+
+## Evidence
+
+- testTypes: unit, integration
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-git-commit-prefix
+trigger: "When making a commit for non-feature/non-fix changes (e.g., cleanup, config updates)"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Git Commit Prefix
+
+## Action
+
+Prefix the commit message with 'chore:'
+
+## Evidence
+
+- commits.prefixes: chore
+- Seen in commit: chore: untrack build artifacts (.pyc) and runtime databases (.sqlite)
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-git-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Git Commit Length
+
+## Action
+
+Keep the commit message concise (average length ~84 characters)
+
+## Evidence
+
+- commits.averageLength: 84
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-workflow-add-core-service
+trigger: "When adding a new major feature or subsystem with persistence and test coverage"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Workflow Add Core Service
+
+## Action
+
+Follow the workflow: define/update models.py, implement repository.py, implement service.py/runner.py, wire up in runtime/bootstrap.py, update configs/v2_runtime.yaml, update __init__.py, write tests in tests/unit/, update milestone docs
+
+## Evidence
+
+- Workflow: add-new-core-service-with-persistence-and-tests
+- Example commit sequence and files
+
+---
+id: capsule_brain_v2_milestone11_repaired-instinct-workflow-remove-artifacts
+trigger: "When cleaning up tracked build artifacts and generated runtime files"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: dawsonblock/capsule_brain_v2_milestone11_repaired
+---
+
+# Capsule_brain_v2_milestone11_repaired Instinct Workflow Remove Artifacts
+
+## Action
+
+Identify .pyc and .sqlite* files tracked by git, remove them from version control, and ensure .gitignore covers these patterns
+
+## Evidence
+
+- Workflow: remove-build-artifacts-and-generated-files
+- Seen in commit: chore: untrack build artifacts (.pyc) and runtime databases (.sqlite)
+
