@@ -25,6 +25,7 @@ class ConversationRepository:
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
             self._conn.execute("PRAGMA foreign_keys=ON;")
+            self._conn.execute("PRAGMA busy_timeout=5000;")
 
             self._conn.executescript(
                 """

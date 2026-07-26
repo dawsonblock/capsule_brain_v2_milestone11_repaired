@@ -123,8 +123,9 @@ class PythonCompileVerifier(ExecutionVerifier):
     name = "python_compile"
     content_type = "python"
     file_extension = ".py"
+    # -B suppresses .pyc writes (workspace may be read-only in container).
     # py_compile returns non-zero on syntax errors; compileall does not.
-    command_template = ["python", "-m", "py_compile", "{artifact}"]
+    command_template = ["python", "-B", "-m", "py_compile", "{artifact}"]
 
 
 class PytestVerifier(ExecutionVerifier):
@@ -133,7 +134,9 @@ class PytestVerifier(ExecutionVerifier):
     name = "pytest"
     content_type = "pytest"
     file_extension = ".py"
-    command_template = ["pytest", "-v", "{artifact}"]
+    # PYTHONDONTWRITEBYTECODE is set by the container runner; for host
+    # execution, pytest's -p no:cacheprovider avoids cache writes.
+    command_template = ["pytest", "-v", "-p", "no:cacheprovider", "{artifact}"]
 
 
 class RuffVerifier(ExecutionVerifier):

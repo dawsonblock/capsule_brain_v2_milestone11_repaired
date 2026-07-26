@@ -61,6 +61,9 @@ class GoalPlannerV2(CapsuleService):
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
             self._db = sqlite3.connect(self.db_path)
+            self._db.execute("PRAGMA journal_mode=WAL;")
+            self._db.execute("PRAGMA synchronous=NORMAL;")
+            self._db.execute("PRAGMA busy_timeout=5000;")
             self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS goals (

@@ -36,6 +36,9 @@ class VerificationRepository:
                 "PRAGMA synchronous=NORMAL;"
             )
             self._conn.execute(
+                "PRAGMA busy_timeout=5000;"
+            )
+            self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS verification_results (
                     id TEXT PRIMARY KEY,

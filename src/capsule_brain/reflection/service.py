@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from typing import Any
 
@@ -13,6 +15,8 @@ from capsule_brain.runtime.service import CapsuleService, HealthStatus, ServiceS
 
 from .models import ReflectionIteration, ReflectionSession, utc_now_iso
 from .repository import ReflectionRepository
+
+log = logging.getLogger(__name__)
 
 
 class ReflectionService(CapsuleService):
@@ -45,6 +49,10 @@ class ReflectionService(CapsuleService):
         self.route = self.cfg.get("route", "reflection")
         self.max_iterations = max(1, int(self.cfg.get("max_iterations", 4)))
         self.max_seed_chars = max(100, int(self.cfg.get("max_seed_chars", 4000)))
+        # Session-level wall-clock budget. Each iteration issues 3 LLM calls
+        # (critique, revise, evaluate); without a cap, degraded providers can
+        # block for minutes per session.
+        self.session_timeout_s = float(self.cfg.get("session_timeout_s", 60.0))
         self._unsubscribers: list = []
         self._runs = 0
         self._failures = 0
@@ -208,38 +216,50 @@ class ReflectionService(CapsuleService):
         current = seed
         prior_revisions: set[str] = {self._normalize(seed)}
 
-        for idx in range(self.max_iterations):
-            critique = await self._critique(current)
-            revision = await self._revise(current, critique)
-            evaluation = await self._evaluate(current, revision, critique)
+        try:
+            async with asyncio.timeout(self.session_timeout_s):
+                for idx in range(self.max_iterations):
+                    critique = await self._critique(current)
+                    revision = await self._revise(current, critique)
+                    evaluation = await self._evaluate(current, revision, critique)
 
-            resolved = self._is_resolved(evaluation)
-            iteration = ReflectionIteration(
-                index=idx,
-                critique=critique,
-                revision=revision,
-                evaluation=evaluation,
-                resolved=resolved,
-            )
-            session.iterations.append(iteration)
-            await self.repository.save(session)
+                    resolved = self._is_resolved(evaluation)
+                    iteration = ReflectionIteration(
+                        index=idx,
+                        critique=critique,
+                        revision=revision,
+                        evaluation=evaluation,
+                        resolved=resolved,
+                    )
+                    session.iterations.append(iteration)
+                    await self.repository.save(session)
 
-            normalized = self._normalize(revision)
-            if resolved:
-                session.final_text = revision
-                session.stop_reason = "resolved"
-                break
+                    normalized = self._normalize(revision)
+                    if resolved:
+                        session.final_text = revision
+                        session.stop_reason = "resolved"
+                        break
 
-            if normalized in prior_revisions:
-                session.final_text = revision
-                session.stop_reason = "duplicate_revision"
-                break
+                    if normalized in prior_revisions:
+                        session.final_text = revision
+                        session.stop_reason = "duplicate_revision"
+                        break
 
-            prior_revisions.add(normalized)
-            current = revision
-        else:
+                    prior_revisions.add(normalized)
+                    current = revision
+                else:
+                    session.final_text = current
+                    session.stop_reason = "max_iterations"
+        except TimeoutError:
+            # Session-level wall-clock budget exhausted. Preserve the latest
+            # revision so partial work is not lost.
             session.final_text = current
-            session.stop_reason = "max_iterations"
+            session.stop_reason = "session_timeout"
+            log.warning(
+                "Reflection session %s timed out after %.1fs",
+                session.id,
+                self.session_timeout_s,
+            )
 
         session.completed_at = utc_now_iso()
         await self.repository.save(session)

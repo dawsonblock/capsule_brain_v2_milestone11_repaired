@@ -108,6 +108,23 @@ class MemoryService(CapsuleService):
             )
         return archived
 
+    async def archive_batch(self, memory_ids: list[str]) -> int:
+        """Archive a batch of memories in a single transaction.
+
+        Returns the number of records actually archived (protected records
+        are skipped). Publishes a single ``memory.archived_batch`` event.
+        """
+        count = await self.repository.archive_batch(memory_ids)
+        if count > 0:
+            await self.event_bus.publish(
+                EventEnvelope(
+                    event_type="memory.archived_batch",
+                    source=self.name,
+                    payload={"count": count, "ids": list(memory_ids)},
+                )
+            )
+        return count
+
     async def health(self) -> HealthStatus:
         return HealthStatus(
             state=self.state,

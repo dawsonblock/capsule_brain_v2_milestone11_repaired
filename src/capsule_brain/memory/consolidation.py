@@ -57,7 +57,6 @@ class MemoryConsolidator(CapsuleService):
 
     async def run_once(self) -> int:
         self._cycles += 1
-        archived = 0
         cutoff = datetime.now(timezone.utc) - timedelta(
             days=self.archive_after_days
         )
@@ -69,21 +68,25 @@ class MemoryConsolidator(CapsuleService):
                 limit=self.max_scan,
                 include_archived=False,
             )
+            # Collect eligible IDs and archive them in a single transaction
+            # to avoid write-lock contention from per-record BEGIN IMMEDIATE.
+            eligible_ids: list[str] = []
             for record in records:
                 if record.protected:
                     continue
                 created = datetime.fromisoformat(record.created_at)
                 if created >= cutoff:
                     continue
-                try:
-                    if await self.memory.archive(record.id):
-                        archived += 1
-                except Exception:
-                    # Fail closed: do not delete/archive on uncertainty.
-                    self._errors += 1
+                eligible_ids.append(record.id)
+
+            if not eligible_ids:
+                return 0
+
+            archived = await self.memory.archive_batch(eligible_ids)
             self._archived += archived
             return archived
         except Exception:
+            # Fail closed: do not delete/archive on uncertainty.
             self._errors += 1
             return 0
 

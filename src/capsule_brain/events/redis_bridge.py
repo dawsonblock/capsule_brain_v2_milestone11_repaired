@@ -54,14 +54,10 @@ class RedisBridge(CapsuleService):
 
     async def start(self) -> None:
         self.state = ServiceState.STARTING
-        self._redis = redis.from_url(self.redis_url, decode_responses=True)
-        await self._redis.ping()
-
-        self._pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
+        # The Redis connection is established inside _listen()'s reconnect
+        # loop so that transient connection failures at startup don't kill
+        # the bridge permanently.
         if self.inbound_topics:
-            await self._pubsub.subscribe(
-                *(self._channel(topic) for topic in sorted(self.inbound_topics))
-            )
             self._listener_task = asyncio.create_task(
                 self._listen(),
                 name="redis-bridge-listener",
@@ -101,41 +97,93 @@ class RedisBridge(CapsuleService):
         return handler
 
     async def _listen(self) -> None:
-        assert self._pubsub is not None
+        """Listen for inbound Redis messages with automatic reconnection.
 
-        try:
-            async for message in self._pubsub.listen():
-                if self.state in {ServiceState.STOPPING, ServiceState.STOPPED}:
-                    break
-                if message.get("type") != "message":
-                    continue
-
-                try:
-                    channel = message["channel"]
-                    prefix = f"{self.channel_prefix}:"
-                    if not channel.startswith(prefix):
-                        continue
-                    topic = channel[len(prefix):]
-
-                    raw = json.loads(message["data"])
-                    event = EventEnvelope(
-                        event_type=raw.get("event_type", topic),
-                        payload=raw.get("payload", {}),
-                        source=raw.get("source", "redis"),
+        On connection loss (Redis restart, network blip), the listener
+        enters an exponential backoff retry loop (1s → 2s → 4s → ... → 30s
+        cap) and reconnects when the server becomes available again. This
+        prevents a single transient failure from permanently killing
+        cross-process messaging.
+        """
+        backoff = 1.0
+        while self.state in {ServiceState.RUNNING, ServiceState.DEGRADED}:
+            try:
+                if self._redis is None:
+                    self._redis = redis.from_url(
+                        self.redis_url, decode_responses=True
                     )
-                    await self.local_bus.publish(event)
-                    self._messages_in += 1
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    self._errors += 1
-                    log.exception("Failed processing inbound Redis message")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._errors += 1
-            self.state = ServiceState.DEGRADED
-            log.exception("Redis bridge listener failed")
+                    await self._redis.ping()
+                    self._pubsub = self._redis.pubsub(
+                        ignore_subscribe_messages=True
+                    )
+                    await self._pubsub.subscribe(
+                        *(
+                            self._channel(topic)
+                            for topic in sorted(self.inbound_topics)
+                        )
+                    )
+                    self.state = ServiceState.RUNNING
+                    backoff = 1.0
+                    log.info("Redis bridge connected and subscribed.")
+
+                assert self._pubsub is not None
+                async for message in self._pubsub.listen():
+                    if self.state in {ServiceState.STOPPING, ServiceState.STOPPED}:
+                        return
+                    if message.get("type") != "message":
+                        continue
+
+                    try:
+                        channel = message["channel"]
+                        prefix = f"{self.channel_prefix}:"
+                        if not channel.startswith(prefix):
+                            continue
+                        topic = channel[len(prefix):]
+
+                        raw = json.loads(message["data"])
+                        event = EventEnvelope(
+                            event_type=raw.get("event_type", topic),
+                            payload=raw.get("payload", {}),
+                            source=raw.get("source", "redis"),
+                        )
+                        await self.local_bus.publish(event)
+                        self._messages_in += 1
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self._errors += 1
+                        log.exception("Failed processing inbound Redis message")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self.state in {ServiceState.STOPPING, ServiceState.STOPPED}:
+                    return
+                self._errors += 1
+                self.state = ServiceState.DEGRADED
+                log.warning(
+                    "Redis bridge connection lost (%s). Retrying in %.1fs...",
+                    exc,
+                    backoff,
+                )
+                await self._cleanup_redis_clients()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+
+    async def _cleanup_redis_clients(self) -> None:
+        """Close and null out Redis clients after a connection failure."""
+        if self._pubsub is not None:
+            try:
+                await self._pubsub.close()
+            except Exception:
+                pass
+            self._pubsub = None
+        if self._redis is not None:
+            try:
+                await self._redis.aclose()
+            except Exception:
+                pass
+            self._redis = None
 
     async def stop(self) -> None:
         self.state = ServiceState.STOPPING

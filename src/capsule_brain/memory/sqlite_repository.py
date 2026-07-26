@@ -32,6 +32,7 @@ class SQLiteMemoryRepository(MemoryRepository):
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
             self._conn.execute("PRAGMA foreign_keys=ON;")
+            self._conn.execute("PRAGMA busy_timeout=5000;")
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memories (
@@ -265,6 +266,36 @@ class SQLiteMemoryRepository(MemoryRepository):
                 )
                 conn.commit()
                 return cur.rowcount == 1
+            except Exception:
+                conn.rollback()
+                raise
+
+    async def archive_batch(self, memory_ids: list[str]) -> int:
+        """Archive multiple memories in a single transaction.
+
+        This avoids the write-lock contention that arises from calling
+        ``archive()`` in a loop, where each call opens a separate
+        ``BEGIN IMMEDIATE`` transaction. Protected records are skipped
+        (the ``WHERE protected = 0`` clause ensures this).
+        """
+        if not memory_ids:
+            return 0
+        async with self._lock:
+            conn = self._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                placeholders = ",".join("?" for _ in memory_ids)
+                cur = conn.execute(
+                    f"""
+                    UPDATE memories
+                    SET archived = 1, updated_at = ?
+                    WHERE id IN ({placeholders}) AND protected = 0
+                    """,
+                    [utc_now_iso()] + list(memory_ids),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
             except Exception:
                 conn.rollback()
                 raise

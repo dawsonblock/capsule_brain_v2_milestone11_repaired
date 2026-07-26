@@ -64,7 +64,18 @@ async def run_application(
         for task in pending:
             task.cancel()
     finally:
-        await runtime.stop()
+        # Hardened teardown: bound runtime.stop() with a timeout so that
+        # long-running background tasks mid-execution don't produce noisy
+        # unhandled cancellation tracebacks during QEventLoop exit.
+        log.info("App runner teardown sequence initiating...")
+        try:
+            await asyncio.wait_for(runtime.stop(), timeout=5.0)
+        except asyncio.TimeoutError:
+            log.error(
+                "Runtime stop timed out after 5s; forcing task cancellation."
+            )
+        except Exception:
+            log.exception("Error encountered during runtime.stop()")
 
 
 def main(
