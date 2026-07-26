@@ -41,6 +41,10 @@ class ExecutionRepository:
                 )
                 """
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_execution_started_at "
+                "ON execution_results(started_at)"
+            )
             self._conn.commit()
 
     async def stop(self) -> None:

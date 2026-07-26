@@ -83,6 +83,8 @@ class ExperienceStore(CapsuleService):
 
             CREATE INDEX IF NOT EXISTS idx_experience_conversation
                 ON experiences(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_experience_created_at
+                ON experiences(created_at);
             CREATE INDEX IF NOT EXISTS idx_feedback_response
                 ON feedback(response_id);
             """

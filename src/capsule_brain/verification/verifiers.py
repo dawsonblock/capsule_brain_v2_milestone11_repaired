@@ -132,18 +132,26 @@ class RequiredFieldsVerifier(Verifier):
 
         try:
             obj = json.loads(subject)
-        except Exception:
+        except Exception as exc:
+            # Fail-closed: if the subject is not valid JSON, the required
+            # fields check cannot pass. Returning SKIP would let malformed
+            # output silently bypass field validation.
             return VerificationCheck(
                 self.name,
-                VerificationStatus.SKIP,
-                "Not parseable JSON.",
+                VerificationStatus.FAIL,
+                "Subject is not valid JSON; required field check failed.",
+                {"error": str(exc)},
             )
 
-        missing = [
-            key
-            for key in required
-            if not isinstance(obj, dict) or key not in obj
-        ]
+        if not isinstance(obj, dict):
+            return VerificationCheck(
+                self.name,
+                VerificationStatus.FAIL,
+                "JSON subject is not an object.",
+                {"expected": "object", "got": type(obj).__name__},
+            )
+
+        missing = [key for key in required if key not in obj]
         return VerificationCheck(
             self.name,
             (
@@ -152,7 +160,7 @@ class RequiredFieldsVerifier(Verifier):
                 else VerificationStatus.PASS
             ),
             (
-                "Missing fields."
+                "Missing required fields."
                 if missing
                 else "Required fields present."
             ),

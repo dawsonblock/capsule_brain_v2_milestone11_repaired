@@ -62,7 +62,10 @@ class MemoryConsolidator(CapsuleService):
             days=self.archive_after_days
         )
         try:
-            records = await self.memory.recent(
+            # Query oldest records first so that records beyond max_scan
+            # are not permanently shielded from archival. Using recent()
+            # (newest-first) would hide old records past the scan window.
+            records = await self.memory.repository.oldest(
                 limit=self.max_scan,
                 include_archived=False,
             )

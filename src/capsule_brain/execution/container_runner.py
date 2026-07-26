@@ -3,11 +3,26 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import sys
 import time
 
 from ._bounded import run_bounded
 from .models import ExecutionRequest, ExecutionResult, now
 from .policy import ExecutionPolicyError, validate_request
+
+
+def _format_volume_mount(host_path: str) -> str:
+    """Format a host path as a Docker/Podman read-only volume mount.
+
+    On Windows, drive letters (``C:\\path``) produce a colon that breaks the
+    ``--volume src:dst:opts`` parser. Convert to the POSIX-style path that
+    Docker Desktop on Windows accepts (``/c/path/to``).
+    """
+    if sys.platform == "win32" and len(host_path) >= 2 and host_path[1] == ":":
+        drive = host_path[0].lower()
+        rest = host_path[2:].replace("\\", "/")
+        return f"/{drive}{rest}:/workspace:ro"
+    return f"{host_path}:/workspace:ro"
 
 
 def _is_digest_pinned(image: str) -> bool:
@@ -133,7 +148,7 @@ class ContainerExecutionRunner:
             "--workdir",
             "/workspace",
             "--volume",
-            f"{cwd}:/workspace:ro",
+            _format_volume_mount(str(cwd)),
             image,
             *request.command,
         ]

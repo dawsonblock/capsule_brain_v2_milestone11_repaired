@@ -256,7 +256,11 @@ class ConversationService(CapsuleService):
             parts.append("\nRelevant recent memory:")
             seen: set[str] = set()
             for memory in memories:
-                # Avoid duplicating current conversation turns unnecessarily.
+                # Skip OPERATOR and ASSISTANT turn memories — their text
+                # already appears in the Conversation history section above.
+                # Including them here would duplicate context and waste tokens.
+                if memory.type in {MemoryType.OPERATOR, MemoryType.ASSISTANT}:
+                    continue
                 key = memory.text.strip()
                 if not key or key in seen:
                     continue

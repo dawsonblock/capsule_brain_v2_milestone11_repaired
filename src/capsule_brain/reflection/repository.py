@@ -40,6 +40,10 @@ class ReflectionRepository:
                 )
                 """
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reflection_created_at "
+                "ON reflection_sessions(created_at)"
+            )
             self._conn.commit()
 
     async def stop(self) -> None:

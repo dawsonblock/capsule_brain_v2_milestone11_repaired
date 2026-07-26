@@ -168,6 +168,41 @@ class SQLiteMemoryRepository(MemoryRepository):
                 ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    async def oldest(
+        self,
+        *,
+        limit: int = 100,
+        include_archived: bool = False,
+    ) -> list[MemoryRecord]:
+        """Return records ordered oldest-first.
+
+        Used by the consolidator so that records beyond ``limit`` are not
+        permanently shielded from archival — unlike ``recent()`` which returns
+        newest-first and would hide old records past the scan window.
+        """
+        async with self._lock:
+            conn = self._require_conn()
+            if include_archived:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM memories
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM memories
+                    WHERE archived = 0
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     async def update(self, record: MemoryRecord) -> MemoryRecord:
         updated = replace(record, updated_at=utc_now_iso())
         async with self._lock:

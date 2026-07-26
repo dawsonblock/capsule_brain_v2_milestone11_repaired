@@ -49,6 +49,14 @@ class VerificationRepository:
                 )
                 """
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_verification_created_at "
+                "ON verification_results(created_at)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_verification_status "
+                "ON verification_results(status)"
+            )
             self._conn.commit()
 
     async def stop(self) -> None:

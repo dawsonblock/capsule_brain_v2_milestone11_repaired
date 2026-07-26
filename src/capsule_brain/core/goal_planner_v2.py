@@ -151,7 +151,69 @@ class GoalPlannerV2(CapsuleService):
                         },
                     )
                 )
+
+                # Auto-complete the goal when all tasks are done.
+                if status == "complete":
+                    await self._maybe_complete_goal(goal, event.correlation_id)
                 return
+
+    async def _maybe_complete_goal(
+        self, goal: Goal, correlation_id: str | None
+    ) -> None:
+        """Mark the goal as completed if all tasks are complete.
+
+        Publishes ``goal.completed`` when the transition happens. This is the
+        missing lifecycle event that ``ReflectionService`` and other consumers
+        can use to track goal resolution.
+        """
+        if goal.status == "complete":
+            return
+        if not goal.tasks:
+            return
+        if not all(task.status == "complete" for task in goal.tasks):
+            return
+
+        goal.status = "complete"
+        await self._save_goal(goal)
+        await self.event_bus.publish(
+            EventEnvelope(
+                event_type="goal.completed",
+                source=self.name,
+                correlation_id=correlation_id,
+                payload={
+                    "goal_id": goal.id,
+                    "text": goal.text,
+                },
+            )
+        )
+
+    async def check_unresolved_goals(self) -> None:
+        """Emit ``goal.unresolved`` for active goals with no complete tasks.
+
+        This bridges the gap between ``GoalPlannerV2`` and
+        ``ReflectionService``, which subscribes to ``goal.unresolved`` but
+        previously had no producer. Intended to be called periodically by a
+        background task or on demand.
+        """
+        goals = await self.list_goals()
+        for goal_dict in goals:
+            if goal_dict["status"] != "active":
+                continue
+            tasks = goal_dict.get("tasks", [])
+            if not tasks:
+                continue
+            # Unresolved = active goal where no task has been completed yet
+            if not any(t["status"] == "complete" for t in tasks):
+                await self.event_bus.publish(
+                    EventEnvelope(
+                        event_type="goal.unresolved",
+                        source=self.name,
+                        payload={
+                            "goal_id": goal_dict["id"],
+                            "text": goal_dict["text"],
+                        },
+                    )
+                )
 
     async def _on_task_edit(self, event: EventEnvelope) -> None:
         goal_id = str(event.payload.get("goal_id", ""))

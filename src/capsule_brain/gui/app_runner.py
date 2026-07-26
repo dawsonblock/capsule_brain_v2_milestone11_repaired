@@ -49,7 +49,20 @@ async def run_application(
             pass
 
     try:
-        await quit_event.wait()
+        # Wait for either an external quit signal (Qt aboutToQuit, SIGINT,
+        # SIGTERM) or an internal runtime shutdown request (e.g. a service
+        # calling runtime.request_shutdown("fatal_error")). Without the
+        # runtime wait, an internal shutdown request would leave the GUI
+        # process hanging on quit_event.wait() indefinitely.
+        runtime_wait_task = asyncio.create_task(runtime.wait())
+        quit_wait_task = asyncio.create_task(quit_event.wait())
+
+        done, pending = await asyncio.wait(
+            [runtime_wait_task, quit_wait_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
     finally:
         await runtime.stop()
 

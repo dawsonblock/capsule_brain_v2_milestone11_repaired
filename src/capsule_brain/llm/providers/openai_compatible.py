@@ -16,7 +16,10 @@ class OpenAICompatibleProvider(LLMProvider):
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._owns_client = client is None
-        self.client = client or httpx.AsyncClient()
+        # Disable httpx's default 5s read timeout. Request timeout is managed
+        # at the gateway level via asyncio.wait_for; without this override,
+        # longer generations silently abort with httpx.ReadTimeout.
+        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(None))
 
     async def generate(self, request: LLMRequest, model_cfg: dict[str, Any]) -> LLMResult:
         api_base = str(model_cfg.get("api_base", "https://api.openai.com/v1")).rstrip("/")

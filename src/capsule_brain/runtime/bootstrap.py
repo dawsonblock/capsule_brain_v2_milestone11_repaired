@@ -42,13 +42,10 @@ def build_application(
     resolved_decomposer = decomposer
     llm_cfg = cfg.get("llm_gateway", {})
     gateway = None
-    experience_store = None
-    conversation = None
 
     if llm_cfg.get("enable", False):
         from capsule_brain.llm.gateway import LLMGateway
         from capsule_brain.llm.goal_decomposer import StructuredGoalDecomposer
-        from capsule_brain.learning.experience_store import ExperienceStore
 
         gateway = LLMGateway(llm_cfg, providers=llm_providers)
         app.services.register(gateway)
@@ -57,157 +54,155 @@ def build_application(
             model=llm_cfg.get("goal_model"),
         )
 
-        learning_cfg = cfg.get("learning", {})
-        experience_store = ExperienceStore(
-            db_path=learning_cfg.get(
-                "db_path",
-                "data/experience_v2.sqlite",
-            ),
-            cfg=learning_cfg,
+    # ExperienceStore is a standalone SQLite store with no LLM dependency.
+    # Register it unconditionally so feedback/conversation can rely on it
+    # regardless of whether the LLM gateway is enabled.
+    from capsule_brain.learning.experience_store import ExperienceStore
+
+    learning_cfg = cfg.get("learning", {})
+    experience_store = ExperienceStore(
+        db_path=learning_cfg.get("db_path", "data/experience_v2.sqlite"),
+        cfg=learning_cfg,
+    )
+    app.services.register(experience_store)
+
+    conversation_cfg = cfg.get("conversation", {})
+    conversation = None
+    # Conversation defaults to enabled when LLM is available, disabled when
+    # it is not. Explicitly enabling conversation without LLM is an error.
+    if conversation_cfg.get("enable", gateway is not None):
+        if gateway is None:
+            raise RuntimeError(
+                "ConversationService requires llm_gateway.enable=true"
+            )
+        from capsule_brain.conversation.service import ConversationService
+
+        conversation = ConversationService(
+            event_bus=bus,
+            memory=memory,
+            llm=gateway,
+            cfg=conversation_cfg,
+            experience_store=experience_store,
         )
-        app.services.register(experience_store)
+        app.services.register(
+            conversation,
+            requires=["event_bus", "memory", "llm_gateway", "experience_store"],
+        )
 
-        conversation_cfg = cfg.get("conversation", {})
-        if conversation_cfg.get("enable", True):
-            from capsule_brain.conversation.service import ConversationService
-
-            conversation = ConversationService(
-                event_bus=bus,
-                memory=memory,
-                llm=gateway,
-                cfg=conversation_cfg,
-                experience_store=experience_store,
+    feedback_cfg = cfg.get("feedback", {})
+    # Feedback defaults to enabled when conversation is available.
+    if feedback_cfg.get("enable", conversation is not None):
+        if conversation is None:
+            raise RuntimeError(
+                "FeedbackService requires conversation.enable=true"
             )
-            app.services.register(
-                conversation,
-                requires=["event_bus", "memory", "llm_gateway", "experience_store"],
+        from capsule_brain.learning.feedback_service import FeedbackService
+
+        feedback = FeedbackService(
+            event_bus=bus,
+            memory=memory,
+            conversations=conversation.repository,
+            experience_store=experience_store,
+            cfg=feedback_cfg,
+        )
+        app.services.register(
+            feedback,
+            requires=["event_bus", "memory", "conversation", "experience_store"],
+        )
+
+    reflection_cfg = cfg.get("reflection", {})
+    # Reflection defaults to enabled when LLM is available.
+    if reflection_cfg.get("enable", gateway is not None):
+        if gateway is None:
+            raise RuntimeError(
+                "ReflectionService requires llm_gateway.enable=true"
+            )
+        from capsule_brain.reflection.service import ReflectionService
+
+        reflection = ReflectionService(
+            event_bus=bus,
+            llm=gateway,
+            memory=memory,
+            cfg=reflection_cfg,
+        )
+        app.services.register(
+            reflection,
+            requires=["event_bus", "memory", "llm_gateway"],
+        )
+
+    execution_cfg = cfg.get("execution", {})
+    if execution_cfg.get("enable", False):
+        from capsule_brain.execution.service import ExecutionService
+
+        runner = None
+        if execution_cfg.get("runner", "host") == "container":
+            from capsule_brain.execution.container_runner import (
+                ContainerExecutionRunner,
+            )
+            from capsule_brain.execution.models import ExecutionPolicy
+
+            policy = ExecutionPolicy(
+                allow=bool(execution_cfg.get("allow", False)),
+                timeout_s=float(execution_cfg.get("timeout_s", 10.0)),
+                max_output_chars=int(
+                    execution_cfg.get("max_output_chars", 20000)
+                ),
+                allowed_commands=tuple(
+                    execution_cfg.get(
+                        "allowed_commands",
+                        ["python", "pytest"],
+                    )
+                ),
+                cwd_root=str(
+                    execution_cfg.get("cwd_root", "sandbox")
+                ),
+            )
+            runner = ContainerExecutionRunner(
+                policy,
+                engine=str(
+                    execution_cfg.get("container_engine", "docker")
+                ),
+                image=str(
+                    execution_cfg.get("container_image", "python:3.11-slim")
+                ),
+                memory=str(
+                    execution_cfg.get("container_memory", "512m")
+                ),
+                memory_swap=str(
+                    execution_cfg.get("container_memory_swap", "512m")
+                ),
+                cpus=str(
+                    execution_cfg.get("container_cpus", "1.0")
+                ),
+                pids_limit=int(
+                    execution_cfg.get("container_pids_limit", 128)
+                ),
+                nofile_limit=int(
+                    execution_cfg.get("container_nofile_limit", 1024)
+                ),
+                pin_image_digest=bool(
+                    execution_cfg.get(
+                        "container_pin_image_digest", True
+                    )
+                ),
             )
 
-            feedback_cfg = cfg.get("feedback", {})
-            if feedback_cfg.get("enable", True):
-                from capsule_brain.learning.feedback_service import FeedbackService
+        execution = ExecutionService(
+            event_bus=bus,
+            cfg=execution_cfg,
+            runner=runner,
+        )
+        app.services.register(execution, requires=["event_bus"])
 
-                feedback = FeedbackService(
-                    event_bus=bus,
-                    memory=memory,
-                    conversations=conversation.repository,
-                    experience_store=experience_store,
-                    cfg=feedback_cfg,
-                )
-                app.services.register(
-                    feedback,
-                    requires=["event_bus", "memory", "conversation", "experience_store"],
-                )
+    verification_cfg = cfg.get("verification", {})
+    if verification_cfg.get("enable", True):
+        from capsule_brain.verification.service import VerificationService
 
-            reflection_cfg = cfg.get("reflection", {})
-            if reflection_cfg.get("enable", True):
-                from capsule_brain.reflection.service import ReflectionService
-
-                reflection = ReflectionService(
-                    event_bus=bus,
-                    llm=gateway,
-                    memory=memory,
-                    cfg=reflection_cfg,
-                )
-                app.services.register(
-                    reflection,
-                    requires=["event_bus", "memory", "llm_gateway"],
-                )
-
-            execution_cfg = cfg.get("execution", {})
-            if execution_cfg.get("enable", False):
-                from capsule_brain.execution.service import ExecutionService
-
-                runner = None
-                if execution_cfg.get("runner", "host") == "container":
-                    from capsule_brain.execution.container_runner import (
-                        ContainerExecutionRunner,
-                    )
-                    from capsule_brain.execution.models import ExecutionPolicy
-
-                    policy = ExecutionPolicy(
-                        allow=bool(execution_cfg.get("allow", False)),
-                        timeout_s=float(execution_cfg.get("timeout_s", 10.0)),
-                        max_output_chars=int(
-                            execution_cfg.get("max_output_chars", 20000)
-                        ),
-                        allowed_commands=tuple(
-                            execution_cfg.get(
-                                "allowed_commands",
-                                ["python", "pytest"],
-                            )
-                        ),
-                        cwd_root=str(
-                            execution_cfg.get("cwd_root", "sandbox")
-                        ),
-                    )
-                    runner = ContainerExecutionRunner(
-                        policy,
-                        engine=str(
-                            execution_cfg.get(
-                                "container_engine",
-                                "docker",
-                            )
-                        ),
-                        image=str(
-                            execution_cfg.get(
-                                "container_image",
-                                "python:3.11-slim",
-                            )
-                        ),
-                        memory=str(
-                            execution_cfg.get(
-                                "container_memory",
-                                "512m",
-                            )
-                        ),
-                        memory_swap=str(
-                            execution_cfg.get(
-                                "container_memory_swap",
-                                "512m",
-                            )
-                        ),
-                        cpus=str(
-                            execution_cfg.get(
-                                "container_cpus",
-                                "1.0",
-                            )
-                        ),
-                        pids_limit=int(
-                            execution_cfg.get(
-                                "container_pids_limit",
-                                128,
-                            )
-                        ),
-                        nofile_limit=int(
-                            execution_cfg.get(
-                                "container_nofile_limit",
-                                1024,
-                            )
-                        ),
-                        pin_image_digest=bool(
-                            execution_cfg.get(
-                                "container_pin_image_digest",
-                                True,
-                            )
-                        ),
-                    )
-
-                execution = ExecutionService(
-                    event_bus=bus,
-                    cfg=execution_cfg,
-                    runner=runner,
-                )
-                app.services.register(
-                    execution,
-                    requires=["event_bus"],
-                )
-
-            verification_cfg = cfg.get("verification", {})
-            if verification_cfg.get("enable", True):
-                from capsule_brain.verification.service import VerificationService
-                verification = VerificationService(event_bus=bus, cfg=verification_cfg)
-                app.services.register(verification, requires=["event_bus"])
+        verification = VerificationService(
+            event_bus=bus,
+            cfg=verification_cfg,
+        )
+        app.services.register(verification, requires=["event_bus"])
 
     goal_planner = GoalPlannerV2(
         event_bus=bus,

@@ -315,6 +315,16 @@ class LLMGateway(CapsuleService):
             except asyncio.CancelledError:
                 raise
 
+            except GeneratorExit:
+                # Consumer stopped consuming early (e.g. UI cancelled
+                # generation). The provider was producing successfully, so
+                # record success — otherwise health metrics would falsely
+                # show a degraded provider.
+                if emitted:
+                    breaker.record_success()
+                    self.provider_health.success(provider.name)
+                raise
+
             except Exception as exc:
                 breaker.record_failure()
                 self.provider_health.failure(provider.name, exc)
